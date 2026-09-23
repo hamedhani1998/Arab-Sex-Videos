@@ -98,7 +98,6 @@ class ArabxCamProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
-        val document = app.get(data, headers = defaultHeaders).document
 
         suspend fun emit(url: String, quality: Int = Qualities.Unknown.value) {
             // حدد النوع صراحة: m3u8 -> M3U8 (وإلا الاستدلال بالـ path ينتهي بـ ?token فيخرج VIDEO -> Source error)
@@ -112,7 +111,22 @@ class ArabxCamProvider : MainAPI() {
             found = true
         }
 
-        // 1) روابط مباشرة في صفحة التفاصيل
+        val raw = app.get(data, headers = defaultHeaders).text
+
+        // 1) النمط الأصلي: flashvars في التفاصيل يحوي video_url + video_alt_url مباشرةً
+        //    (mp4 متدرج بأسماء جودة: video_url_text / video_alt_url_text). التوكن لازم (بدونه 403).
+        val native = Regex("""video_url(_alt)?\s*:\s*'([^']*)'""", RegexOption.IGNORE_CASE)
+            .findAll(raw).map { Triple(
+                it.groups[1] != null,                       // هو البديل (alt)؟
+                it.groupValues[2],                          // الرابط
+                qualityFromText(it.groups[1] != null, raw)
+            ) }.distinctBy { it.second }
+        for ((isAlt, url, q) in native) {
+            if (url.contains(".mp4") || url.contains(".m3u8")) emit(url, q)
+        }
+
+        // 2) روابط free في التفاصيل خارج script
+        val document = app.get(data, headers = defaultHeaders).document
         for (el in document.select("video source[src], video[src], source[src]")) {
             val src = el.attr("src").ifBlank { el.attr("data-src") }
             if (src.isNotBlank() && (src.contains(".mp4") || src.contains(".m3u8"))) emit(fixUrl(src))
@@ -124,30 +138,34 @@ class ArabxCamProvider : MainAPI() {
             }
         }
 
-        // 2) embed playeriz — المشغل الحقيقي داخل eval مضغوط
-        if (!found) {
-            for (iframe in document.select("iframe[src]")) {
-                val src = iframe.attr("src").ifBlank { continue }
-                val html = try {
-                    app.get(fixUrl(src), headers = defaultHeaders + ("Referer" to safeReferer())).text
-                } catch (_: Exception) { continue }
+        // 3) embed playeriz — المشغل الحقيقي داخل eval مضغوط
+        for (iframe in document.select("iframe[src]")) {
+            val src = iframe.attr("src").ifBlank { continue }
+            val html = try {
+                app.get(fixUrl(src), headers = defaultHeaders + ("Referer" to safeReferer())).text
+            } catch (_: Exception) { continue }
 
-                // مسارات حرة إن وجدت
-                val plain = Regex("""https?://[^\s"']+\.(?:m3u8|mp4)[^\s"']*""", RegexOption.IGNORE_CASE)
-                    .findAll(html).map { it.value }.distinct()
-                    .filterNot { it.endsWith(".jpg") || it.endsWith(".png") || it.endsWith(".webp") }
-                for (c in plain) emit(c)
+            // مسارات حرة إن وجدت
+            val plain = Regex("""https?://[^\s"']+\.(?:m3u8|mp4)[^\s"']*""", RegexOption.IGNORE_CASE)
+                .findAll(html).map { it.value }.distinct()
+                .filterNot { it.endsWith(".jpg") || it.endsWith(".png") || it.endsWith(".webp") }
+            for (c in plain) emit(c)
 
-                if (!found) {
-                    val unpacked = unpackPacked(html)
-                    if (unpacked != null) {
-                        findMasterM3U8(unpacked)?.let { emit(it) }
-                    }
-                }
+            val unpacked = unpackPacked(html)
+            if (unpacked != null) {
+                findMasterM3U8(unpacked)?.let { emit(it) }
             }
         }
 
         return found
+    }
+
+    /** استخراج الجودة من نص التسمية النمطية: '480p' / '720p' / '360p' ... */
+    private fun qualityFromText(isAlt: Boolean, raw: String): Int {
+        val key = if (isAlt) "video_alt_url_text" else "video_url_text"
+        val label = Regex(key + """\s*:\s*'([^']*)'""").find(raw)?.groupValues?.get(1)
+        val num = label?.let { Regex("""(\d{3,4})p?""").find(it)?.groupValues?.get(1)?.toIntOrNull() }
+        return num ?: Qualities.Unknown.value
     }
 
     // ---------- فكّ الكود المضغوط (Dean Edwards packer) ----------
