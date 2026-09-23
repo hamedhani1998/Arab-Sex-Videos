@@ -81,18 +81,16 @@ jobs:
 
       - name: Publish to builds branch
         run: |
+          rm -rf _publish
+          mkdir -p _publish
+          cp dist/*.cs3 dist/plugins.json _publish/
+          ls -la _publish
+          cd _publish
+          git init -q
           git config user.name "hamedhani1998"
           git config user.email "hamedhani1998@users.noreply.github.com"
-          git fetch origin builds 2>/dev/null || git fetch --all 2>/dev/null || true
-          git checkout --orphan builds 2>/dev/null || git switch --orphan builds
-          git rm -rf . 2>/dev/null || true
-          rm -rf .github build gradle src || true
-          cp dist/*.cs3 dist/plugins.json . 2>/dev/null || true
-          ls -la
           git add -A
-          if git diff --cached --quiet; then
-            echo "No changes"
-          else
-            git commit -m "Publish plugins"
-            git push -f origin builds
-          fi
+          git commit -m "Publish plugins"
+          git branch -M builds
+          git remote add origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          git push -f origin builds
