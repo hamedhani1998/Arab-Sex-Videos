@@ -115,12 +115,12 @@ class ArabxCamProvider : MainAPI() {
 
         // 1) النمط الأصلي: flashvars في التفاصيل يحوي video_url + video_alt_url مباشرةً
         //    (mp4 متدرج بأسماء جودة: video_url_text / video_alt_url_text). التوكن لازم (بدونه 403).
-        val native = Regex("""video_url(_alt)?\s*:\s*'([^']*)'""", RegexOption.IGNORE_CASE)
-            .findAll(raw).map { Triple(
-                it.groups[1] != null,                       // هو البديل (alt)؟
-                it.groupValues[2],                          // الرابط
-                qualityFromText(it.groups[1] != null, raw)
-            ) }.distinctBy { it.second }
+        //    ملاحظة: البديل يسمى video_alt_url (alt_ قبل url) وليس video_url_alt!
+        val native = Regex("""video_(alt_)?url\s*:\s*'([^']*)'""", RegexOption.IGNORE_CASE)
+            .findAll(raw).map {
+                val isAlt = it.groups[1] != null           // هو البديل (alt)؟
+                Triple(isAlt, it.groupValues[2], qualityFromText(isAlt, raw))  // الرابط + الجودة
+            }.distinctBy { it.second }
         for ((_, url, q) in native) {
             if (url.contains(".mp4") || url.contains(".m3u8")) emit(url, q)
         }
