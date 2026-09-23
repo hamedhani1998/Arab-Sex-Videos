@@ -34,7 +34,8 @@ class SexAlArabProvider : MainAPI() {
     private fun Element.toSearchResponse(): SearchResponse? {
         val link = this.selectFirst("a[href]") ?: return null
         val href = link.attr("href").ifBlank { return null }
-        val title = link.attr("title").ifBlank { link.text().ifBlank { return null } }
+        val rawTitle = link.attr("title").ifBlank { link.text().ifBlank { return null } }
+        val title = cleanTitle(rawTitle)
         val poster = this.selectFirst("img")?.attr("src")
             ?: this.selectFirst("img")?.attr("data-src")
         return newMovieSearchResponse(title, href, TvType.NSFW) {
@@ -83,8 +84,8 @@ class SexAlArabProvider : MainAPI() {
         val document = app.get(url, headers = defaultHeaders).document
 
         val title = document.selectFirst("h1.htitle, h1.entry-title, h1.title, h1")?.text()
-            ?.replace("مترجم", "")?.replace("مدبلج", "")?.trim()
-            ?: document.title().substringBefore("|").trim()
+            ?.let { cleanTitle(it) }
+            ?: cleanTitle(document.title().substringBefore("|").trim())
             ?: return null
 
         val poster = document.selectFirst("img.poster, .single-poster img, img[itemprop=image]")?.attr("src")
