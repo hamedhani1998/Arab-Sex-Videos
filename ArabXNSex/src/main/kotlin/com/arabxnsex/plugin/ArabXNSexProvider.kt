@@ -13,7 +13,7 @@ import org.jsoup.nodes.Element
 class ArabXNSexProvider : MainAPI() {
     override var mainUrl = "https://arabxn.sex"
     override var name = "arabxn.sex"
-    override val supportedTypes = setOf(TvType.Movie)
+    override val supportedTypes = setOf(TvType.Movie, TvType.NSFW)
     override var lang = "ar"
     override val hasMainPage = true
 
@@ -27,7 +27,15 @@ class ArabXNSexProvider : MainAPI() {
         val url = if (page <= 1) mainUrl else "$mainUrl/?page=$page"
         val document = app.get(url, headers = defaultHeaders).document
         val items = document.select("article, .post, .item, .video-item, .c-video").mapNotNull { it.toSearchResponse() }
-        return newHomePageResponse(listOf(HomePageList("أحدث مقاطع arabxn.sex", items)))
+        val moreUrl = if (page <= 1) "$mainUrl/?page=2" else "$mainUrl/?page=${page + 1}"
+        val moreDoc = app.get(moreUrl, headers = defaultHeaders).document
+        val moreItems = moreDoc.select("article, .post, .item, .video-item, .c-video").mapNotNull { it.toSearchResponse() }
+        return newHomePageResponse(
+            listOf(
+                HomePageList("أحدث مقاطع arabxn.sex", items),
+                HomePageList("المزيد من أحدث مقاطع arabxn.sex", moreItems)
+            )
+        )
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -53,7 +61,12 @@ class ArabXNSexProvider : MainAPI() {
         }
     }
 
-    override suspend fun loadLinks(
+    
+    private fun serverHost(url: String): String {
+        val host = Regex("""https?://([^/:]+)""").find(url)?.groupValues?.get(1)
+        return host?.removePrefix("www.") ?: "سيرفر"
+    }
+override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
@@ -64,7 +77,7 @@ class ArabXNSexProvider : MainAPI() {
 
         suspend fun emit(url: String, quality: Int = Qualities.Unknown.value) {
             callback.invoke(
-                newExtractorLink("arabxnsex", "سيرفر مباشر", url, ExtractorLinkType.VIDEO) {
+                newExtractorLink("arabxnsex", serverHost(url), url, ExtractorLinkType.VIDEO) {
                     this.quality = quality
                     this.referer = mainUrl
                 }

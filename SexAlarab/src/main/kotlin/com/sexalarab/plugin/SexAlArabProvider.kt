@@ -16,7 +16,7 @@ import org.jsoup.nodes.Element
 class SexAlArabProvider : MainAPI() {
     override var mainUrl = "https://sexalarab.com"
     override var name = "سكس العرب"
-    override val supportedTypes = setOf(TvType.Movie)
+    override val supportedTypes = setOf(TvType.Movie, TvType.NSFW)
     override var lang = "ar"
     override val hasMainPage = true
 
@@ -31,7 +31,15 @@ class SexAlArabProvider : MainAPI() {
         val url = if (page <= 1) mainUrl else "$mainUrl/?page=$page"
         val document = app.get(url, headers = defaultHeaders).document
         val items = document.select("article, .post, .item, .video-item, .sw-item").mapNotNull { it.toSearchResponse() }
-        return newHomePageResponse(listOf(HomePageList("أحدث أفلام سكس العرب", items)))
+        val moreUrl = if (page <= 1) "$mainUrl/?page=2" else "$mainUrl/?page=${page + 1}"
+        val moreDoc = app.get(moreUrl, headers = defaultHeaders).document
+        val moreItems = moreDoc.select("article, .post, .item, .video-item, .sw-item").mapNotNull { it.toSearchResponse() }
+        return newHomePageResponse(
+            listOf(
+                HomePageList("أحدث أفلام سكس العرب", items),
+                HomePageList("المزيد من أحدث أفلام سكس العرب", moreItems)
+            )
+        )
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -61,7 +69,12 @@ class SexAlArabProvider : MainAPI() {
         }
     }
 
-    override suspend fun loadLinks(
+    
+    private fun serverHost(url: String): String {
+        val host = Regex("""https?://([^/:]+)""").find(url)?.groupValues?.get(1)
+        return host?.removePrefix("www.") ?: "سيرفر"
+    }
+override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
@@ -72,7 +85,7 @@ class SexAlArabProvider : MainAPI() {
 
         suspend fun emit(url: String, quality: Int = Qualities.Unknown.value) {
             callback.invoke(
-                newExtractorLink("sexalarab", "سيرفر مباشر", url, ExtractorLinkType.VIDEO) {
+                newExtractorLink("sexalarab", serverHost(url), url, ExtractorLinkType.VIDEO) {
                     this.quality = quality
                     this.referer = mainUrl
                 }
