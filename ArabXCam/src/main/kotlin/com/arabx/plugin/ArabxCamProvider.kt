@@ -121,9 +121,13 @@ class ArabxCamProvider : MainAPI() {
                 it.groupValues[2],                          // الرابط
                 qualityFromText(it.groups[1] != null, raw)
             ) }.distinctBy { it.second }
-        for ((isAlt, url, q) in native) {
+        for ((_, url, q) in native) {
             if (url.contains(".mp4") || url.contains(".m3u8")) emit(url, q)
         }
+
+        // نمط B يكتمل هنا: flashvars موجود → الجودتان mp4 جاهزتان، لا نحتاج
+        // embed إضافياً (المشغلان متنافيان). نعود فوراً لتسريع "جلب بيانات التشغيل".
+        if (found) return true
 
         // 2) روابط free في التفاصيل خارج script
         val document = app.get(data, headers = defaultHeaders).document
