@@ -85,8 +85,7 @@ class SexAlArabProvider : MainAPI() {
 
         val title = document.selectFirst("h1.htitle, h1.entry-title, h1.title, h1")?.text()
             ?.let { cleanTitle(it) }
-            ?: cleanTitle(document.title().substringBefore("|").trim())
-            ?: return null
+            ?: cleanTitle(document.title().substringBefore("|").trim()).ifBlank { return null }
 
         val poster = document.selectFirst("img.poster, .single-poster img, img[itemprop=image]")?.attr("src")
             ?: document.selectFirst("img")?.attr("src")
