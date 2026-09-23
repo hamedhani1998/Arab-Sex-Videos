@@ -70,9 +70,9 @@ class SexAlArabProvider : MainAPI() {
         var found = false
         val document = app.get(data, headers = defaultHeaders).document
 
-        fun emit(url: String, quality: Int = Qualities.Unknown.value) {
+        suspend fun emit(url: String, quality: Int = Qualities.Unknown.value) {
             callback.invoke(
-                newExtractorLink("sexalarab", "سيرفر مباشر", url, ExtractorLinkType.MP4) {
+                newExtractorLink("sexalarab", "سيرفر مباشر", url, ExtractorLinkType.VIDEO) {
                     this.quality = quality
                     this.referer = mainUrl
                 }
@@ -81,13 +81,13 @@ class SexAlArabProvider : MainAPI() {
         }
 
         // 1) روابط mp4/m3u8 داخل صفحة التفاصيل
-        document.select("video source[src], video[src], source[src]").forEach { el ->
+        for (el in document.select("video source[src], video[src], source[src]")) {
             val src = el.attr("src").ifBlank { el.attr("data-src") }
             if (src.isNotBlank() && (src.contains(".mp4") || src.contains(".m3u8"))) {
                 emit(fixUrl(src))
             }
         }
-        document.select("a[href]").forEach { a ->
+        for (a in document.select("a[href]")) {
             val href = a.attr("href")
             if ((href.contains(".mp4") || href.contains(".m3u8")) && !href.endsWith(".jpg") && !href.endsWith(".png") && !href.endsWith(".webp")) {
                 emit(fixUrl(href))
@@ -97,33 +97,34 @@ class SexAlArabProvider : MainAPI() {
         // 2) المشغل عبر api.sexalarab.net (بنية HLS بأرقام)
         if (!found) {
             val text = document.text()
-            Regex("""api\.sexalarab\.net/videos/\d+[^\s"']*""", RegexOption.IGNORE_CASE).findAll(text)
-                .map { fixUrl(it.value) }.distinct().forEach { emit(it, Qualities.Unknown.value) }
+            for (m in Regex("""api\.sexalarab\.net/videos/\d+[^\s"']*""", RegexOption.IGNORE_CASE).findAll(text)) {
+                emit(fixUrl(m.value), Qualities.Unknown.value)
+            }
         }
 
         // 3) إن لم يجد، اتبع iframe
         if (!found) {
-            document.select("iframe[src]").forEach { iframe ->
-                val src = iframe.attr("src").ifBlank { return@forEach }
+            for (iframe in document.select("iframe[src]")) {
+                val src = iframe.attr("src").ifBlank { continue }
                 val iframeDoc = try {
                     app.get(fixUrl(src), headers = defaultHeaders + ("Referer" to data)).document
-                } catch (_: Exception) { return@forEach }
+                } catch (_: Exception) { continue }
 
-                iframeDoc.select("video source[src], video[src], source[src]").forEach { el ->
+                for (el in iframeDoc.select("video source[src], video[src], source[src]")) {
                     val s = el.attr("src").ifBlank { el.attr("data-src") }
                     if (s.isNotBlank() && (s.contains(".mp4") || s.contains(".m3u8"))) emit(fixUrl(s))
                 }
-                iframeDoc.select("a[href]").forEach { a ->
+                for (a in iframeDoc.select("a[href]")) {
                     val href = a.attr("href")
                     if ((href.contains(".mp4") || href.contains(".m3u8")) && !href.endsWith(".jpg") && !href.endsWith(".png")) {
                         emit(fixUrl(href))
                     }
                 }
                 val iframeText = iframeDoc.text()
-                Regex("""https?://[^\s"']+\.(?:mp4|m3u8)[^\s"']*""", RegexOption.IGNORE_CASE)
+                val candidates = Regex("""https?://[^\s"']+\.(?:mp4|m3u8)[^\s"']*""", RegexOption.IGNORE_CASE)
                     .findAll(iframeText).map { it.value }.distinct()
                     .filterNot { it.endsWith(".jpg") || it.endsWith(".png") }
-                    .forEach { emit(it) }
+                for (c in candidates) emit(c)
             }
         }
 

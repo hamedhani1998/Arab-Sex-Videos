@@ -79,9 +79,9 @@ class SexAlArabNetProvider : MainAPI() {
     ): Boolean {
         var found = false
 
-        fun emit(url: String, quality: Int = Qualities.Unknown.value) {
+        suspend fun emit(url: String, quality: Int = Qualities.Unknown.value) {
             callback.invoke(
-                newExtractorLink("sexalarabnet", "سيرفر مباشر", url, ExtractorLinkType.MP4) {
+                newExtractorLink("sexalarabnet", "سيرفر مباشر", url, ExtractorLinkType.VIDEO) {
                     this.quality = quality
                     this.referer = mainUrl
                 }
@@ -92,14 +92,14 @@ class SexAlArabNetProvider : MainAPI() {
         val document = app.get(data, headers = defaultHeaders).document
 
         // 1) mp4/m3u8 ضمن عناصر المشغل (video/source) أو روابط مباشرة في التفاصيل
-        document.select("video source, video[src], source[src]").forEach { el ->
+        for (el in document.select("video source, video[src], source[src]")) {
             val src = el.attr("src").ifBlank { el.attr("data-src") }
             if (src.isNotBlank() && (src.contains(".mp4") || src.contains(".m3u8"))) {
                 emit(fixUrl(src))
             }
         }
 
-        document.select("a[href]").forEach { a ->
+        for (a in document.select("a[href]")) {
             val href = a.attr("href")
             if ((href.contains(".mp4") || href.contains(".m3u8")) && !href.endsWith(".jpg") && !href.endsWith(".png")) {
                 emit(fixUrl(href))
@@ -116,11 +116,11 @@ class SexAlArabNetProvider : MainAPI() {
                 } catch (_: Exception) { continue }
 
                 // mp4/m3u8 داخل iframe
-                iframeDoc.select("video source, video[src], source[src]").forEach { el ->
+                for (el in iframeDoc.select("video source, video[src], source[src]")) {
                     val src = el.attr("src").ifBlank { el.attr("data-src") }
                     if (src.isNotBlank() && (src.contains(".mp4") || src.contains(".m3u8"))) emit(fixUrl(src))
                 }
-                iframeDoc.select("a[href]").forEach { a ->
+                for (a in iframeDoc.select("a[href]")) {
                     val href = a.attr("href")
                     if ((href.contains(".mp4") || href.contains(".m3u8")) && !href.endsWith(".jpg") && !href.endsWith(".png")) {
                         emit(fixUrl(href))
@@ -129,8 +129,9 @@ class SexAlArabNetProvider : MainAPI() {
 
                 // روابط داخل أكواد JS مضغوطة في iframe (نمط ukrcdn/next)
                 val text = iframeDoc.text()
-                Regex("""https?://[^\s"']+\.(?:m3u8|mp4)[^\s"']*""", RegexOption.IGNORE_CASE)
-                    .findAll(text).map { it.value }.distinct().forEach { emit(it) }
+                val candidates = Regex("""https?://[^\s"']+\.(?:m3u8|mp4)[^\s"']*""", RegexOption.IGNORE_CASE)
+                    .findAll(text).map { it.value }.distinct()
+                for (c in candidates) emit(c)
             }
         }
 

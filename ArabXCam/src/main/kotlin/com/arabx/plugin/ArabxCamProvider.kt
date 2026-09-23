@@ -65,9 +65,9 @@ class ArabxCamProvider : MainAPI() {
         var found = false
         val document = app.get(data, headers = defaultHeaders).document
 
-        fun emit(url: String, quality: Int = Qualities.Unknown.value) {
+        suspend fun emit(url: String, quality: Int = Qualities.Unknown.value) {
             callback.invoke(
-                newExtractorLink("arabx", "سيرفر مباشر", url, ExtractorLinkType.MP4) {
+                newExtractorLink("arabx", "سيرفر مباشر", url, ExtractorLinkType.VIDEO) {
                     this.quality = quality
                     this.referer = mainUrl
                 }
@@ -75,11 +75,11 @@ class ArabxCamProvider : MainAPI() {
             found = true
         }
 
-        document.select("video source[src], video[src], source[src]").forEach { el ->
+        for (el in document.select("video source[src], video[src], source[src]")) {
             val src = el.attr("src").ifBlank { el.attr("data-src") }
             if (src.isNotBlank() && (src.contains(".mp4") || src.contains(".m3u8"))) emit(fixUrl(src))
         }
-        document.select("a[href]").forEach { a ->
+        for (a in document.select("a[href]")) {
             val href = a.attr("href")
             if ((href.contains(".mp4") || href.contains(".m3u8")) && !href.endsWith(".jpg") && !href.endsWith(".png") && !href.endsWith(".webp")) {
                 emit(fixUrl(href))
@@ -87,15 +87,15 @@ class ArabxCamProvider : MainAPI() {
         }
 
         if (!found) {
-            document.select("iframe[src]").forEach { iframe ->
-                val src = iframe.attr("src").ifBlank { return@forEach }
+            for (iframe in document.select("iframe[src]")) {
+                val src = iframe.attr("src").ifBlank { continue }
                 val html = try {
                     app.get(fixUrl(src), headers = defaultHeaders).text
-                } catch (_: Exception) { return@forEach }
-                Regex("""https?://[^\s"']+\.(?:mp4|m3u8)[^\s"']*""", RegexOption.IGNORE_CASE)
+                } catch (_: Exception) { continue }
+                val candidates = Regex("""https?://[^\s"']+\.(?:mp4|m3u8)[^\s"']*""", RegexOption.IGNORE_CASE)
                     .findAll(html).map { it.value }.distinct()
                     .filterNot { it.endsWith(".jpg") || it.endsWith(".png") }
-                    .forEach { emit(it) }
+                for (c in candidates) emit(c)
             }
         }
 
