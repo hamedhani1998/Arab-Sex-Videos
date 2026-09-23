@@ -13,7 +13,7 @@ import org.jsoup.nodes.Element
 class ArabxCamProvider : MainAPI() {
     override var mainUrl = "https://arabx.cam"
     override var name = "عرب اكس"
-    override val supportedTypes = setOf(TvType.Movie, TvType.NSFW)
+    override val supportedTypes = setOf(TvType.NSFW)
     override var lang = "ar"
     override val hasMainPage = true
 
@@ -58,7 +58,7 @@ class ArabxCamProvider : MainAPI() {
         val poster = document.selectFirst("img.poster, .single-poster img, img[itemprop=image]")?.attr("src")
             ?: document.selectFirst("img")?.attr("src")
 
-        return newMovieLoadResponse(title, url, TvType.Movie, url) {
+        return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = poster
             this.plot = document.selectFirst("meta[name=description]")?.attr("content")
         }
@@ -121,7 +121,7 @@ override suspend fun loadLinks(
         val title = link.attr("title").ifBlank { link.text().ifBlank { return null } }
         val poster = this.selectFirst("img")?.attr("src")
             ?: this.selectFirst("img")?.attr("data-src")
-        return newMovieSearchResponse(title, href, TvType.Movie) {
+        return newMovieSearchResponse(title, href, TvType.NSFW) {
             this.posterUrl = poster
         }
     }

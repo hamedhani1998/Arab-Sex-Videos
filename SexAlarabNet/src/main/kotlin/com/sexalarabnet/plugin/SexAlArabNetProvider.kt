@@ -19,7 +19,7 @@ import org.jsoup.nodes.Element
 class SexAlArabNetProvider : MainAPI() {
     override var mainUrl = "https://sexalarab.net"
     override var name = "سكس العرب نت"
-    override val supportedTypes = setOf(TvType.Movie, TvType.NSFW)
+    override val supportedTypes = setOf(TvType.NSFW)
     override var lang = "ar"
     override val hasMainPage = true
 
@@ -71,7 +71,7 @@ class SexAlArabNetProvider : MainAPI() {
         val poster = document.selectFirst("img.poster, .poster img, img[itemprop=image]")?.attr("src")
             ?: document.selectFirst("img")?.attr("src")
 
-        return newMovieLoadResponse(title, url, TvType.Movie, url) {
+        return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = poster
             this.plot = document.selectFirst("meta[name=description]")?.attr("content")
         }
@@ -155,7 +155,7 @@ override suspend fun loadLinks(
         val title = link.attr("title").ifBlank { link.text().ifBlank { return null } }
         val poster = this.selectFirst("img")?.attr("src")
             ?: this.selectFirst("img")?.attr("data-src")
-        return newMovieSearchResponse(title, href, TvType.Movie) {
+        return newMovieSearchResponse(title, href, TvType.NSFW) {
             this.posterUrl = poster
         }
     }

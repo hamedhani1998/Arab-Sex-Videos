@@ -13,7 +13,7 @@ import org.jsoup.nodes.Element
 class ArabXNProvider : MainAPI() {
     override var mainUrl = "https://arabxn.com"
     override var name = "عرب xn"
-    override val supportedTypes = setOf(TvType.Movie, TvType.NSFW)
+    override val supportedTypes = setOf(TvType.NSFW)
     override var lang = "ar"
     override val hasMainPage = true
 
@@ -55,7 +55,7 @@ class ArabXNProvider : MainAPI() {
             if (el.hasAttr("src")) el.attr("src") else el.attr("poster")
         } ?: document.selectFirst("img")?.attr("src")
 
-        return newMovieLoadResponse(title, url, TvType.Movie, url) {
+        return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = poster
             this.plot = document.selectFirst("meta[name=description]")?.attr("content")
         }
@@ -119,7 +119,7 @@ override suspend fun loadLinks(
         val poster = this.selectFirst("img")?.attr("src")
             ?: this.selectFirst("img")?.attr("data-src")
             ?: this.selectFirst("img")?.attr("data-poster")
-        return newMovieSearchResponse(title, href, TvType.Movie) {
+        return newMovieSearchResponse(title, href, TvType.NSFW) {
             this.posterUrl = poster
         }
     }
