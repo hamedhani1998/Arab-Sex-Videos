@@ -1,0 +1,100 @@
+name: Build and Publish
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Build all modules
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: ./gradlew build
+
+      - name: Collect cs3 artifacts
+        run: |
+          mkdir -p dist
+          for f in */build/*.cs3; do
+            [ -f "$f" ] && cp "$f" dist/
+          done
+          ls -la dist/
+
+      - name: Generate plugins.json
+        run: |
+          python3 - <<'EOF'
+          import json, os, hashlib, glob
+          plugins = []
+          repo_url = "https://github.com/${{ github.repository }}"
+          # name of .cs3 file = module name = unique internalName
+          label_map = {
+            "SexAlarab": "سكس العرب",
+            "SexAlarabNet": "سكس العرب نت",
+            "ArabXCam": "عرب اكس",
+            "XHorno": "xhorno",
+            "ArabXN": "عرب xn",
+            "ArabXNSex": "arabxn.sex",
+          }
+          for f in sorted(glob.glob("dist/*.cs3")):
+              name = os.path.basename(f)[:-4]
+              label = label_map.get(name, name)
+              with open(f, "rb") as fh:
+                  data = fh.read()
+              plugins.append({
+                  "apiVersion": 1,
+                  "repositoryUrl": repo_url,
+                  "fileSize": len(data),
+                  "status": 1,
+                  "language": "ar",
+                  "authors": ["hamedhani1998"],
+                  "tvTypes": ["NSFW"],
+                  "version": 1,
+                  "internalName": name,
+                  "description": f"{label} - أفلام إباحية عربية",
+                  "url": f"{repo_url}/raw/refs/heads/builds/{name}.cs3",
+                  "name": label,
+                  "fileHash": "sha256-" + hashlib.sha256(data).hexdigest(),
+              })
+          with open("dist/plugins.json", "w", encoding="utf-8") as fh:
+              json.dump(plugins, fh, ensure_ascii=False, indent=2)
+          print("dist files:", os.listdir("dist"))
+          EOF
+
+      - name: Publish to builds branch
+        run: |
+          git config user.name "hamedhani1998"
+          git config user.email "hamedhani1998@users.noreply.github.com"
+          # فتح فرع builds نظيف بدءاً من الحالة الفارغة (أورفان)
+          git fetch origin builds 2>/dev/null || git fetch --all 2>/dev/null || true
+          git checkout --orphan builds 2>/dev/null || git switch --orphan builds
+          git rm -rf . 2>/dev/null || true
+          rm -rf .github build gradle src || true
+          cp dist/*.cs3 dist/plugins.json . 2>/dev/null || true
+          ls -la
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes"
+          else
+            git commit -m "Publish plugins
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>"
+            git push -f origin builds
+          fi
