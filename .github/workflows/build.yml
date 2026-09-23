@@ -1,9 +1,15 @@
 name: Build and Publish
 
+concurrency:
+  group: "build"
+  cancel-in-progress: true
+
 on:
   push:
     branches:
       - main
+    paths-ignore:
+      - '*.md'
   workflow_dispatch:
 
 jobs:
@@ -12,7 +18,19 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          path: "src"
+
+      - name: Checkout builds
+        uses: actions/checkout@v4
+        with:
+          ref: "builds"
+          path: "builds"
+
+      - name: Clean old builds
+        run: rm -f $GITHUB_WORKSPACE/builds/*.cs3 $GITHUB_WORKSPACE/builds/plugins.json
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -20,32 +38,25 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v2
 
       - name: Make gradlew executable
-        run: chmod +x gradlew
+        run: chmod +x src/gradlew
 
-      - name: Build all modules
+      - name: Build Plugins
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
-        run: ./gradlew build
-
-      - name: Collect cs3 artifacts
         run: |
-          mkdir -p dist
-          for f in */build/*.cs3; do
-            [ -f "$f" ] && cp "$f" dist/
-          done
-          ls -la dist/
+          cd $GITHUB_WORKSPACE/src
+          ./gradlew make makePluginsJson
+          cp **/build/*.cs3 $GITHUB_WORKSPACE/builds
+          cp build/plugins.json $GITHUB_WORKSPACE/builds
 
-      - name: Generate plugins.json
+      - name: Arabic labels in plugins.json
         run: |
           python3 - <<'EOF'
-          import json, os, hashlib, glob
-          plugins = []
-          repo_url = "https://github.com/${{ github.repository }}"
-          # name of .cs3 file = module name = unique internalName
+          import json
           label_map = {
             "SexAlarab": "سكس العرب",
             "SexAlarabNet": "سكس العرب نت",
@@ -54,43 +65,29 @@ jobs:
             "ArabXN": "عرب xn",
             "ArabXNSex": "arabxn.sex",
           }
-          for f in sorted(glob.glob("dist/*.cs3")):
-              name = os.path.basename(f)[:-4]
-              label = label_map.get(name, name)
-              with open(f, "rb") as fh:
-                  data = fh.read()
-              plugins.append({
-                  "apiVersion": 1,
-                  "repositoryUrl": repo_url,
-                  "fileSize": len(data),
-                  "status": 1,
-                  "language": "ar",
-                  "authors": ["hamedhani1998"],
-                  "tvTypes": ["NSFW"],
-                  "version": 1,
-                  "internalName": name,
-                  "description": f"{label} - أفلام إباحية عربية",
-                  "url": f"{repo_url}/raw/refs/heads/builds/{name}.cs3",
-                  "name": label,
-                  "fileHash": "sha256-" + hashlib.sha256(data).hexdigest(),
-              })
-          with open("dist/plugins.json", "w", encoding="utf-8") as fh:
+          p = "$GITHUB_WORKSPACE/builds/plugins.json"
+          with open(p, encoding="utf-8") as fh:
+              plugins = json.load(fh)
+          for pl in plugins:
+              internal = pl.get("internalName", "")
+              if internal in label_map:
+                  pl["name"] = label_map[internal]
+              pl["repositoryUrl"] = "https://github.com/${{ github.repository }}"
+              pl.setdefault("language", "ar")
+          with open(p, "w", encoding="utf-8") as fh:
               json.dump(plugins, fh, ensure_ascii=False, indent=2)
-          print("dist files:", os.listdir("dist"))
+          print("plugins:", [x.get("name") for x in plugins])
           EOF
 
-      - name: Publish to builds branch
+      - name: Push builds
         run: |
-          rm -rf _publish
-          mkdir -p _publish
-          cp dist/*.cs3 dist/plugins.json _publish/
-          ls -la _publish
-          cd _publish
-          git init -q
-          git config user.name "hamedhani1998"
-          git config user.email "hamedhani1998@users.noreply.github.com"
-          git add -A
-          git commit -m "Publish plugins"
-          git branch -M builds
-          git remote add origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
-          git push -f origin builds
+          cd $GITHUB_WORKSPACE/builds
+          git config --local user.email "hamedhani1998@users.noreply.github.com"
+          git config --local user.name "hamedhani1998"
+          git add .
+          if git diff --cached --quiet; then
+            echo "Nothing to commit"
+          else
+            git commit --amend -m "Build $GITHUB_SHA"
+            git push --force
+          fi
