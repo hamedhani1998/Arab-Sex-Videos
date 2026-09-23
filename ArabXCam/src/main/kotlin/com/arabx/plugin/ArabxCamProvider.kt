@@ -214,16 +214,20 @@ class ArabxCamProvider : MainAPI() {
             .substringAfter("'").substringBeforeLast("'")
         val dict = dictStr.split("|")
 
-        // التبديل التنازلي تماماً مثل JS: while(c--) من count-1 إلى 0
-        var out = packed
+        // التبديل التنازلي تماماً مثل JS: while(c--) من count-1 إلى 0.
+        // لكن لا نستخدم \b حدود الكلمات: في الرموز base-36 هناك تصادم
+        // (مثل "2" داخل "28" أو "0" داخل "0.3") يفسد روابط s1.playiri.com
+        // التي تحمل أرقاماً مثل ",l,n,h,.urlset" و "i=0.3". نستبدل كل
+        // تسلسل [0-9a-z]+ مقابل الخريطة بمسح واحد بدل استبدال كل مفتاح.
+        val map = HashMap<String, String>()
         for (c in (count - 1) downTo 0) {
             val key = if (radix == 16) Integer.toHexString(c) else c.toString(radix)
             val word = dict.getOrNull(c)
             if (!word.isNullOrEmpty() && word != "\\0") {
-                out = out.replace(Regex("\\b" + Regex.escape(key) + "\\b")) { word }
+                map[key] = word
             }
         }
-        return out
+        return packed.replace(Regex("[0-9a-z]+")) { m -> map[m.value] ?: m.value }
     }
 
     private fun splitTopLevel(s: String): List<String> {

@@ -96,31 +96,6 @@ class SexAlArabProvider : MainAPI() {
         }
     }
 
-    private suspend fun loadFlashvars(
-        document: Document,
-        data: String,
-        defaultHeaders: Map<String, String>,
-        emit: (url: String, quality: Int) -> Unit
-    ): Boolean {
-        var found = false
-        val raw = document.select("script").joinToString("\n") { it.html() }
-
-        // النمط الأصلي: flashvars في التفاصيل يحوي video_url + video_alt_url
-        // (mp4 مع جودة: _360p,_480p,_720p) — أُرسل كما هي (قاعدة get_file).
-        val native = Regex("""video_(alt_)?url\s*:\s*'([^']*)'""", RegexOption.IGNORE_CASE)
-            .findAll(raw).map {
-                val isAlt = it.groups[1] != null
-                Triple(isAlt, it.groupValues[2], qualityFromText(isAlt, raw))
-            }.distinctBy { it.second }
-        for ((_, url, q) in native) {
-            if (url.contains(".mp4") || url.contains(".m3u8")) {
-                emit(url, q)
-                found = true
-            }
-        }
-        return found
-    }
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -142,14 +117,19 @@ class SexAlArabProvider : MainAPI() {
 
         val raw = app.get(data, headers = defaultHeaders).text
 
-        // 1) flashvars مباشرة (video_(alt_)?url) — mp4 متدرج بأسماء جودة
-        val native = Regex("""video_(alt_)?url\s*:\s*'([^']*)'""", RegexOption.IGNORE_CASE)
-            .findAll(raw).map {
-                val isAlt = it.groups[1] != null
-                Triple(isAlt, it.groupValues[2], qualityFromText(isAlt, raw))
-            }.distinctBy { it.second }
-        for ((_, url, q) in native) {
-            if (url.contains(".mp4") || url.contains(".m3u8")) emit(url, q)
+        // 1) flashvars مباشرة (video_url / video_alt_url / video_alt_url2) —
+        //    mp4 متدرج بأسماء جودة، مع بادئة function/0 نزيلها (mp4 مباشر)
+        val native = Regex(
+            """video_(alt\d+_)?url\s*:\s*'([^']*)'""",
+            RegexOption.IGNORE_CASE
+        ).findAll(raw).mapNotNull {
+            val rawUrl = it.groupValues[2]
+            if (!rawUrl.contains(".mp4") && !rawUrl.contains(".m3u8")) return@mapNotNull null
+            val urlWithoutPrefix = rawUrl.removePrefix("function/0/")
+            Triple(it.groups[1]?.value, urlWithoutPrefix, qualityFromRawKey(it.groups[1]?.value, raw))
+        }.distinctBy { it.second }
+        for ((key, url, q) in native) {
+            emit(url, q)
         }
         if (found) return true
 
@@ -167,9 +147,11 @@ class SexAlArabProvider : MainAPI() {
         return found
     }
 
-    private fun qualityFromText(isAlt: Boolean, raw: String): Int {
-        val key = if (isAlt) "video_alt_url_text" else "video_url_text"
-        val label = Regex(key + """\s*:\s*'([^']*)'""").find(raw)?.groupValues?.get(1)
+    /** استخراج الجودة من _text المرافق: "video_url_text" / "video_alt_url_text" / "video_alt_url2_text" */
+    private fun qualityFromRawKey(key: String?, raw: String): Int {
+        // key قيمته null (video_url) ، "alt_" (video_alt_url) ، أو "alt2_" (video_alt_url2)
+        val textKey = "video_" + (key ?: "") + "url_text"
+        val label = Regex(textKey + """\s*:\s*'([^']*)'""").find(raw)?.groupValues?.get(1)
         val num = label?.let { Regex("""(\d{3,4})p?""").find(it)?.groupValues?.get(1)?.toIntOrNull() }
         return num ?: Qualities.Unknown.value
     }

@@ -23,37 +23,57 @@ class XHornoProvider : MainAPI() {
         "Accept-Language" to "ar,en-US;q=0.8"
     )
 
+    private val mainSections = listOf(
+        "سكس مترجم" to "/tag/سكس-مترجم/",
+        "افلام سكس مترجم" to "/tag/افلام-سكس-مترجم/",
+        "سكس محجبات مترجم" to "/tag/سكس-محجبات-مترجم/",
+        "سكس اخوات مترجم" to "/tag/سكس-اخوات-مترجم/",
+        "سكس ياباني مترجم" to "/tag/سكس-ياباني-مترجم/",
+        "شورتات" to "/shorts/"
+    )
+
+    private suspend fun fetchItems(url: String): List<SearchResponse> {
+        return try {
+            app.get(url, headers = defaultHeaders).document
+                .select("article.video-card, article, .post, .item, .video-item, .c-video")
+                .mapNotNull { it.toSearchResponse() }
+                .distinctBy { it.url }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = if (page <= 1) mainUrl else "$mainUrl/?page=$page"
-        val document = app.get(url, headers = defaultHeaders).document
-        val items = document.select("article, .post, .item, .video-item, .c-video").mapNotNull { it.toSearchResponse() }
-        val moreUrl = if (page <= 1) "$mainUrl/?page=2" else "$mainUrl/?page=${page + 1}"
-        val moreDoc = app.get(moreUrl, headers = defaultHeaders).document
-        val moreItems = moreDoc.select("article, .post, .item, .video-item, .c-video").mapNotNull { it.toSearchResponse() }
-        return newHomePageResponse(
-            listOf(
-                HomePageList("أحدث مقاطع xhorno", items),
-                HomePageList("المزيد من أحدث مقاطع xhorno", moreItems)
-            )
-        )
+        val lists = if (page <= 1) buildList {
+            add(HomePageList("أحدث مقاطع xhorno", fetchItems(mainUrl)))
+            for ((label, path) in mainSections) {
+                add(HomePageList(label, fetchItems("$mainUrl$path")))
+            }
+        } else buildList {
+            add(HomePageList("أحدث مقاطع xhorno — صفحة $page", fetchItems("$mainUrl/?page=$page")))
+        }
+        return newHomePageResponse(lists)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val document = app.get("$mainUrl/search/$query/", headers = defaultHeaders).document
-        return document.select("article, .post, .item, .video-item, .c-video").mapNotNull { it.toSearchResponse() }
+        val document = try {
+            app.get("$mainUrl/search/$query/", headers = defaultHeaders).document
+        } catch (_: Exception) {
+            return emptyList()
+        }
+        return document.select("article.video-card, article, .post, .item, .video-item, .c-video").mapNotNull { it.toSearchResponse() }
     }
 
     override suspend fun load(url: String): LoadResponse? {
         val document = app.get(url, headers = defaultHeaders).document
 
         val title = document.selectFirst("h1.htitle, h1.entry-title, h1.title, h1")?.text()
-            ?.replace("مترجم", "")?.replace("مدبلج", "")?.trim()
-            ?: document.title().substringBefore("|").trim()
-            ?: return null
+            ?.let { cleanTitle(it) }
+            ?: cleanTitle(document.title().substringBefore("|").trim()).ifBlank { return null }
 
-        val poster = document.selectFirst("img.poster, .single-poster img, video[poster]")?.let { el ->
-            if (el.hasAttr("src")) el.attr("src") else el.attr("poster")
-        } ?: document.selectFirst("img")?.attr("src")
+        val poster = document.selectFirst("video[poster]")?.attr("poster")
+            ?: document.selectFirst("img.poster, .single-poster img, img[itemprop=image]")?.attr("src")
+            ?: document.selectFirst("img")?.attr("src")
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = poster
@@ -76,8 +96,9 @@ override suspend fun loadLinks(
         val document = app.get(data, headers = defaultHeaders).document
 
         suspend fun emit(url: String, quality: Int = Qualities.Unknown.value) {
+            val type = if (url.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
             callback.invoke(
-                newExtractorLink("xhorno", serverHost(url), url, ExtractorLinkType.VIDEO) {
+                newExtractorLink("xhorno", serverHost(url), url, type) {
                     this.quality = quality
                     this.referer = mainUrl
                 }
@@ -85,14 +106,32 @@ override suspend fun loadLinks(
             found = true
         }
 
+        // مصدر HTML5: <source size="720|360|240"> — الجودة تقرأ من size= فيظهر "720p" بجوار الرابط
         for (el in document.select("video source[src], video[src], source[src]")) {
             val src = el.attr("src").ifBlank { el.attr("data-src") }
-            if (src.isNotBlank() && (src.contains(".mp4") || src.contains(".m3u8"))) emit(fixUrl(src))
+            if (src.isNotBlank() && (src.contains(".mp4") || src.contains(".m3u8"))) {
+                val q = (el.attr("size").ifBlank { el.attr("label") })
+                    ?.let { Regex("""(\d{3,4})p?""").find(it)?.groupValues?.get(1)?.toIntOrNull() }
+                    ?: Qualities.Unknown.value
+                emit(fixUrl(src), q)
+            }
         }
+
+        // ترجمة عربية VTT إن وجدت في <track>
+        for (tr in document.select("track[kind=captions][src]")) {
+            val trackSrc = tr.attr("src")
+            if (trackSrc.isNotBlank()) {
+                subtitleCallback.invoke(SubtitleFile("العربية", fixUrl(trackSrc)))
+            }
+        }
+
         for (a in document.select("a[href]")) {
             val href = a.attr("href")
             if ((href.contains(".mp4") || href.contains(".m3u8")) && !href.endsWith(".jpg") && !href.endsWith(".png") && !href.endsWith(".webp")) {
-                emit(fixUrl(href))
+                val q = (a.attr("size").ifBlank { a.attr("label") })
+                    ?.let { Regex("""(\d{3,4})p?""").find(it)?.groupValues?.get(1)?.toIntOrNull() }
+                    ?: Qualities.Unknown.value
+                emit(fixUrl(href), q)
             }
         }
 
@@ -115,12 +154,23 @@ override suspend fun loadLinks(
     private fun Element.toSearchResponse(): SearchResponse? {
         val link = this.selectFirst("a[href]") ?: return null
         val href = link.attr("href").ifBlank { return null }
-        val title = link.attr("title").ifBlank { link.text().ifBlank { return null } }
-        val poster = this.selectFirst("img")?.attr("src")
+        val rawTitle = link.attr("title").ifBlank { link.text().ifBlank { return null } }
+        val title = cleanTitle(rawTitle)
+        val poster = this.selectFirst("img.video-card-poster")?.attr("src")
+            ?: this.selectFirst("img")?.attr("src")
             ?: this.selectFirst("img")?.attr("data-src")
-            ?: this.selectFirst("img")?.attr("data-poster")
         return newMovieSearchResponse(title, href, TvType.NSFW) {
             this.posterUrl = poster
         }
+    }
+
+    /** لقب البطاقة/التفاصيل صيغته "الاسم - <تصنيف>" في attr title؛ نأخذ الجزء قبل " - " فقط */
+    private fun cleanTitle(raw: String): String {
+        val t = raw.trim()
+            .substringBefore(" - ")
+            .substringBefore(" | ")
+            .trim()
+            .replace(Regex("""\s+"""), " ")
+        return t.ifBlank { raw.trim() }
     }
 }
