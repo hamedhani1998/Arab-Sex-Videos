@@ -70,11 +70,9 @@ class ArabxCamProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         val document = app.get(url, headers = defaultHeaders).document
 
-        val title = document.selectFirst("h1.htitle, h1.entry-title, h1.title, h1")?.text()
-            ?.substringBefore(" - ")
-            ?.replace("مترجم", "")?.replace("مدبلج", "")?.trim()
-            ?.takeIf { it.isNotBlank() }
-            ?: document.title().substringBefore(" | ").substringBefore(" - ").trim()
+        val title = (document.selectFirst("h1.htitle, h1.entry-title, h1.title, h1")?.text()
+            ?: document.title()).let { cleanTitle(it) }
+            .takeIf { it.isNotBlank() }
             ?: return null
 
         val poster = document.selectFirst("meta[property=og:image]")?.attr("content")
@@ -103,8 +101,10 @@ class ArabxCamProvider : MainAPI() {
         val document = app.get(data, headers = defaultHeaders).document
 
         suspend fun emit(url: String, quality: Int = Qualities.Unknown.value) {
+            // حدد النوع صراحة: m3u8 -> M3U8 (وإلا الاستدلال بالـ path ينتهي بـ ?token فيخرج VIDEO -> Source error)
+            val type = if (url.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
             callback.invoke(
-                newExtractorLink("arabx", serverHost(url), url, ExtractorLinkType.VIDEO) {
+                newExtractorLink("arabx", serverHost(url), url, type) {
                     this.quality = quality
                     this.referer = safeReferer()
                 }
@@ -242,12 +242,25 @@ class ArabxCamProvider : MainAPI() {
         return re.find(unpacked)?.value
     }
 
+    /** استخراج اسم الفيلم من عنوان البطاقة:
+     *  صيغة attr-title: "سكس مترجم - <اسم الفيلم> - سكس امهات" أو "<اسم> - سكس مترجم | تصنيف"
+     *  الجزء الجوهري غالباً هو الفهرس الثاني عند وجود " - ", وأولاً عند غيابه. */
+    private fun cleanTitle(raw: String): String {
+        var t = raw.trim()
+            .substringBefore(" | ")
+            .trim()
+        val parts = t.split(" - ").map { it.trim() }.filter { it.isNotBlank() }
+        t = if (parts.size >= 3) parts[1] else parts.firstOrNull() ?: t
+        // إزالة لاحقات تصنيف
+        t = t.replace("مترجم", "").replace("مدبلج", "").trim()
+        return t.ifBlank { parts.firstOrNull() ?: raw }
+    }
+
     private fun Element.toSearchResponse(): SearchResponse? {
         val link = this.selectFirst("a[href]") ?: return null
         val href = link.attr("href").ifBlank { return null }
         val rawTitle = link.attr("title").ifBlank { link.text().ifBlank { return null } }
-        // العنوان النظيف = قبل " - " (الذيل "سكس مترجم | مراهقات,..." يُقص)
-        val title = rawTitle.substringBefore(" - ").trim().ifBlank { rawTitle }
+        val title = cleanTitle(rawTitle)
         val poster = this.selectFirst("img.thumb")?.attr("data-original")
             ?: this.selectFirst("img.thumb")?.attr("data-webp")
             ?: this.selectFirst("img")?.attr("src")
