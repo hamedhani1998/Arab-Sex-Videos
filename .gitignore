@@ -56,3 +56,7 @@ XHorno/build/
 SexAlarab/build/
 SexAlarabNet/build/
 ArabXCam/build/
+
+# CI outputs regenerated on the builds branch — never commit on main
+build/
+builds/
