@@ -1,4 +1,4 @@
-version = 1
+version = 2
 
 cloudstream {
     description = "سكس العرب - أفلام إباحية عربية مترجمة"
