@@ -51,9 +51,11 @@ jobs:
           cp build/plugins.json $GITHUB_WORKSPACE/builds
 
       - name: Arabic labels in plugins.json
+        env:
+          WS: ${{ github.workspace }}
         run: |
           python3 - <<'EOF'
-          import json
+          import json, os
           label_map = {
             "SexAlarab": "سكس العرب",
             "SexAlarabNet": "سكس العرب نت",
@@ -62,7 +64,8 @@ jobs:
             "ArabXN": "عرب xn",
             "ArabXNSex": "arabxn.sex",
           }
-          p = "$GITHUB_WORKSPACE/builds/plugins.json"
+          ws = os.environ["WS"]
+          p = os.path.join(ws, "builds", "plugins.json")
           with open(p, encoding="utf-8") as fh:
               plugins = json.load(fh)
           for pl in plugins:
