@@ -141,10 +141,14 @@ class ArabxCamProvider : MainAPI() {
                 if (src.contains("google") || src.contains("doubleclick") || src.contains("propaganda")) continue
                 val resolved = fixUrl(src)
                 android.util.Log.i("arabx", "embed try: $resolved")
+                // مهلة قصيرة للجلب — لو تعثّر الـ embed (شبكة/سيرفر)، ننتقل سريعاً للبديل
+                // بدل تعليق 15+ ثانية (كما يظهر timeout في السجل).
                 val html = try {
-                    app.get(resolved, headers = defaultHeaders + ("Referer" to safeReferer())).text
+                    kotlinx.coroutines.withTimeout(8000) {
+                        app.get(resolved, headers = defaultHeaders + ("Referer" to safeReferer())).text
+                    }
                 } catch (e: Exception) {
-                    android.util.Log.w("arabx", "embed fetch fail: ${e.message}")
+                    android.util.Log.w("arabx", "embed fetch fail (${e.javaClass.simpleName}): ${e.message}")
                     continue
                 }
                 val unpacked = unpackPacked(html)
@@ -173,11 +177,16 @@ class ArabxCamProvider : MainAPI() {
             }
         }
 
-        // 2b) روابط free في نص التفاصيل مباشرة (احتياط أخير — mp4 مباشرة من get_file غالباً 403)
+        // 2b) روابط free في نص التفاصيل مباشرة (احتياط أخير).
+        //     get_file خام (دون v-acctoken) يعطي Source error في اللاعب — نستبعده،
+        //     ونبقي get_file المُوسوم بتوكن (يظهر في الصفحة ويُقبل عبر Cronet).
         if (!found) {
             val freeInText = Regex("""https?://[^\s"'<>]+\.(?:m3u8|mp4)[^\s"'<>]*""", RegexOption.IGNORE_CASE)
                 .findAll(raw).map { it.value }.distinct()
-                .filterNot { it.endsWith(".jpg") || it.endsWith(".png") || it.endsWith(".webp") }
+                .filterNot {
+                    it.endsWith(".jpg") || it.endsWith(".png") || it.endsWith(".webp") ||
+                        (it.contains("get_file") && !it.contains("v-acctoken"))
+                }
             for (c in freeInText) {
                 android.util.Log.i("arabx", "free-link fallback: $c")
                 emit(c)
