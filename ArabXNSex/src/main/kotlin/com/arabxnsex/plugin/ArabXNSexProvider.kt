@@ -27,12 +27,12 @@ class ArabXNSexProvider : MainAPI() {
     )
 
     private val mainSections = listOf(
+        // أقسام بمحتوى أجنبي/إنجليزي (مترجم للعربية): arabxn متخصص في المحتوى الأجنبي المترجم
+        "سكس اجنبي" to "/categories/سكس-اجنبي/",
         "سكس مترجم" to "/categories/سكس-مترجم/",
-        "سكس امهات" to "/categories/سكس-امهات/",
-        "سكس محارم" to "/categories/سكس-محارم/",
-        "سكس اخوات" to "/categories/سكس-اخوات/",
+        "xnxx مترجم" to "/categories/xnxx-مترجم/",
         "سكس سحاق" to "/categories/سكس-سحاق/",
-        "سكس عراقي" to "/categories/سكس-عراقي/"
+        "سكس محارم" to "/categories/سكس-محارم/"
     )
 
     private suspend fun fetchItems(url: String): List<SearchResponse> {
@@ -70,7 +70,9 @@ class ArabXNSexProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         val document = app.get(url, headers = defaultHeaders).document
 
-        val title = document.selectFirst("h1.htitle, h1.entry-title, h1.title, h1")?.text()
+        // عنوان الفيديو الحقيقي: og:title ثم <title>. (وسم h1 الوحيد في الصفحة هو شعار الموقع "arabxn.sex")
+        val title = document.selectFirst("meta[property=og:title]")?.attr("content")
+            ?.ifBlank { null }
             ?.let { cleanTitle(it) }
             ?: cleanTitle(document.title().substringBefore("|").trim()).ifBlank { return null }
 
@@ -112,8 +114,15 @@ override suspend fun loadLinks(
 
         val raw = app.get(data, headers = defaultHeaders).text
 
-        // flashvars: video_url: 'function/0/https://...get_file/...mp4/' مع video_url_text: '480p'
-        // نُطلق الرابط بدون بادئة function/0 (يتعامل معه ExoPlayer كـ mp4 مباشر)
+        // 1) المصدر الحي: JSON-LD "contentUrl" — get_file بهاش حي يوجّه 302 إلى cdn.arabxn.sex (mp4)
+        val jsonLdContent = Regex(""""contentUrl"\s*:\s*"([^"]+)"""")
+            .find(raw)?.groupValues?.get(1)
+        if (jsonLdContent != null && (jsonLdContent.contains(".mp4") || jsonLdContent.contains(".m3u8"))) {
+            emit(fixUrl(jsonLdContent))
+        }
+
+        // 2) flashvars: video_url: 'function/0/https://...get_file/...mp4/' — الهاش في flashvars قد يكون ميتاً
+        //    يُطلق كملاذ أخير بدون بادئة function/0 (يوجّه 302 إلى cdn عند عمله)
         val native = Regex("""video_(alt_)?url\s*:\s*'([^']*)'""", RegexOption.IGNORE_CASE)
             .findAll(raw).map {
                 val isAlt = it.groups[1] != null
@@ -160,9 +169,14 @@ override suspend fun loadLinks(
 
     /** لقب البطاقة/التفاصيل: "الاسم الكامل - سكس" — نأخذ قبل آخر " - " ليتحول من "الاسم - تصنيف" */
     private fun cleanTitle(raw: String): String {
-        val t = raw.trim().substringBefore(" | ").trim()
+        val unescaped = try {
+            org.jsoup.parser.Parser.unescapeEntities(raw, false)
+        } catch (_: Exception) {
+            raw
+        }
+        val t = unescaped.trim().substringBefore(" | ").trim()
         val parts = t.split(" - ").map { it.trim() }.filter { it.isNotBlank() }
         val cleaned = if (parts.size >= 2) parts.dropLast(1).joinToString(" - ") else t
-        return cleaned.trim().replace(Regex("""\s+"""), " ").ifBlank { raw.trim() }
+        return cleaned.trim().replace(Regex("""\s+"""), " ").ifBlank { unescaped.trim() }
     }
 }
