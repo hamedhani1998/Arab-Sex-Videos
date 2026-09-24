@@ -122,6 +122,8 @@ override suspend fun loadLinks(
                 ?.groupValues?.get(1)?.toIntOrNull()
             return num ?: Qualities.Unknown.value
         }
+        // هل الصفحة تصف المقطع كـ HD؟  (شارة <span class="is-hd">HD</span>)
+        val hasHdBadge = Regex("""class=["'][^"']*\bis-hd\b[^"']*["']""").containsMatchIn(raw)
 
         // نجمع أزواج (رابط get_file، جودة)
         val pairs = LinkedHashMap<String, Int>()
@@ -163,7 +165,13 @@ override suspend fun loadLinks(
             callback.invoke(
                 newExtractorLink(
                     "arabxnsex",
-                    "arabxn${if (q != Qualities.Unknown.value) " • ${q}p" else ""}",
+                    buildString {
+                        append("arabxn")
+                        when {
+                            q != Qualities.Unknown.value -> append(" • ${q}p")
+                            hasHdBadge -> append(" • HD")
+                        }
+                    },
                     cdn,
                     ExtractorLinkType.VIDEO
                 ) {
