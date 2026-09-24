@@ -120,30 +120,42 @@ class ArabxCamProvider : MainAPI() {
         val raw = resp.text
         val document = resp.document
 
-        // ═══ 1) embed playeriz أولاً — الفيديو الحقيقي (m3u8 على s1.playiri.com) داخل
-        //        eval مضغوط في صفحة الـ embed. أي mp4 في التفاصيل هو معاينة/ترتيبي لا يشغّل.
+        // ═══ 1) embed playeriz أولاً — المسار الحقيقي. نفوّضه إلى المشغل المسجّل
+        //        PlayerIz (ExtractorApi من addon extractors.cs3 المثبّت على الجهاز) عبر
+        //        loadExtractor؛ إن لم يوجد extractor أو فشل، نستخدم unpack اليدوي كاحتياط.
         if (!found) {
             android.util.Log.i("arabx", "loadLinks: مسح embeds…")
             for (iframe in document.select("iframe[src]")) {
                 if (found) break
                 val src = iframe.attr("src").ifBlank { continue }
-                // تجاهل إطارات الإعلانات فقط (لا تعتمد كلمة "ad" الـ ضيقة)
+                // تجاهل إطارات الإعلانات فقط (لا تعتمد كلمة "ad" الـ ضيقة — تستبعد روابط حقيقية)
                 if (src.contains("google") || src.contains("doubleclick") || src.contains("propaganda")) continue
-                android.util.Log.i("arabx", "embed try: $src")
-                val html = try {
-                    app.get(fixUrl(src), headers = defaultHeaders + ("Referer" to safeReferer())).text
+                val resolved = fixUrl(src)
+                android.util.Log.i("arabx", "embed try: $resolved")
+                val delegated = try {
+                    // يتجه إلى أي ExtractorApi مسجّل يعرف هذا المضيف (PlayerIz) — يرجع بروابط
+                    loadExtractor(resolved, data, subtitleCallback, callback)
                 } catch (e: Exception) {
-                    android.util.Log.w("arabx", "embed fetch fail: ${e.message}")
-                    continue
+                    android.util.Log.w("arabx", "loadExtractor fail: ${e.message}")
+                    false
                 }
-                val unpacked = unpackPacked(html)
-                if (unpacked != null) {
-                    findMasterM3U8(unpacked)?.let {
-                        android.util.Log.i("arabx", "unpacked master: $it")
-                        emit(it)
+                if (delegated) { found = true; break } else {
+                    // إحتياط: استخرج master.m3u8 يدوياً من صفحة embed ضمن المزوّد
+                    val html = try {
+                        app.get(resolved, headers = defaultHeaders + ("Referer" to safeReferer())).text
+                    } catch (e: Exception) {
+                        android.util.Log.w("arabx", "embed fetch fail: ${e.message}")
+                        continue
                     }
-                } else {
-                    android.util.Log.w("arabx", "no packed eval في embed")
+                    val unpacked = unpackPacked(html)
+                    if (unpacked != null) {
+                        findMasterM3U8(unpacked)?.let {
+                            android.util.Log.i("arabx", "unpacked master: $it")
+                            emit(it)
+                        }
+                    } else {
+                        android.util.Log.w("arabx", "no packed eval في embed")
+                    }
                 }
             }
         }
