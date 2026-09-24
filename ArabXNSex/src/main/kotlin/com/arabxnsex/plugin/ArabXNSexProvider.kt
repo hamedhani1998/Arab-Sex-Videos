@@ -100,60 +100,66 @@ override suspend fun loadLinks(
     ): Boolean {
         var found = false
 
-        suspend fun emit(url: String, quality: Int = Qualities.Unknown.value) {
-            callback.invoke(
-                newExtractorLink("arabxnsex", serverHost(url), url, ExtractorLinkType.VIDEO) {
-                    this.quality = quality
-                    this.referer = mainUrl
-                }
-            )
-            found = true
+        // جلب صفحة التفاصيل مرة واحدة فقط — ينشئ جلسة (PHPSESSID) ويمنحنا المحتوى
+        val resp = try {
+            app.get(data, headers = defaultHeaders)
+        } catch (_: Exception) {
+            return found
         }
+        val raw = resp.text
 
-        // نزور الموقع أولاً حتى يُنشئ OkHttp جلسة (PHPSESSID) — بدونها get_file يرد 410 Gone
-        try {
-            app.get(mainUrl, headers = defaultHeaders)
-        } catch (_: Exception) {}
+        // التقاط جلسة PHPSESSID من Set-Cookie لتسليمها للمشغل مع رابط get_file
+        val session = resp.headers["Set-Cookie"]
+            ?.substringAfter("PHPSESSID=", "")
+            ?.substringBefore(";")
+            ?.trim()
+        val cookieHeader = if (session.isNullOrEmpty()) null else "PHPSESSID=$session"
 
-        val raw = app.get(data, headers = defaultHeaders).text
-
-        // الهاشتان متغيّران لكل جلسة — نصِف كل get_file مع جودته من قرائن flashvars
-        val candidates = LinkedHashMap<String, Int>()
-
-        // 1) JSON-LD contentUrl (الجودة الافتراضية)
+        // جودة من flashvars (قائمة الموقع قد تتضمن أرقاماً؛ الملف الفعلي واحد)
+        fun labelToQuality(expr: String): Int {
+            val num = Regex("""(\d{3,4})p?""", RegexOption.IGNORE_CASE).find(expr)
+                ?.groupValues?.get(1)?.toIntOrNull()
+            return num ?: Qualities.Unknown.value
+        }
+        // نجمع أزواج (رابط، جودة) محتملة
+        val pairs = LinkedHashMap<String, Int>()
         Regex(""""contentUrl"\s*:\s*"([^"]+)"""").find(raw)?.also {
-            candidates[it.groupValues[1]] = Qualities.Unknown.value
+            pairs[it.groupValues[1]] = Qualities.Unknown.value
         }
-
-        // 2) flashvars: video_url (مع video_url_text) و video_alt_url (مع video_alt_url_text) — هاتان الجودتان
         Regex("""video_(alt_)?url\s*:\s*'function/0/([^']*)'""", RegexOption.IGNORE_CASE)
             .findAll(raw).forEach {
                 val isAlt = it.groupValues[1].isNotEmpty()
                 val url = it.groupValues[2]
                 val key = if (isAlt) "video_alt_url_text" else "video_url_text"
-                val label = Regex(Regex.escape(key) + """\s*:\s*'([^']*)'""", RegexOption.IGNORE_CASE)
-                    .find(raw)?.groupValues?.get(1)
-                val q = label?.let {
-                    Regex("""(\d{3,4})p?""").find(it)?.groupValues?.get(1)?.toIntOrNull()
-                } ?: Qualities.Unknown.value
-                candidates.putIfAbsent(url, q)
+                val labelText = Regex(Regex.escape(key) + """\s*:\s*'([^']*)'""", RegexOption.IGNORE_CASE)
+                    .find(raw)?.groupValues?.get(1).orEmpty()
+                pairs.putIfAbsent(url, labelToQuality(labelText))
             }
-
-        // 3) أي get_file آخر غير مكرر
         Regex("""https://arabxn\.sex/get_file/[^\s"'<>]+""")
-            .findAll(raw).forEach { candidates.putIfAbsent(it.value.trimEnd('\\', '"', '\''), Qualities.Unknown.value) }
+            .findAll(raw).forEach { pairs.putIfAbsent(it.value.trimEnd('\\', '"', '\''), Qualities.Unknown.value) }
 
-        // لكل مرشح: نتبّع 302 إلى CDN (cdn.arabxn.sex?token=..) داخل OkHttp المحمل بالجلسة،
-        // ونمرّر المشغل الرابط النهائي — لا يحتاج ExoPlayer لأي جلسة (CDN ب token فقط).
-        for ((candidate, q) in candidates) {
+        for ((candidate, q) in pairs) {
             val getFile = candidate.removePrefix("function/0/")
             if (!getFile.contains(".mp4") && !getFile.contains(".m3u8")) continue
-            val finalUrl = try {
-                app.get(getFile, referer = mainUrl).url
-            } catch (_: Exception) {
-                getFile
+            val headers = buildMap {
+                put("Referer", mainUrl)
+                cookieHeader?.let { put("Cookie", it) }
             }
-            emit(finalUrl, q)
+            // نسلّم رابط get_file مباشرة (مع cookie) — المشغل يتبع 302 إلى CDN بنفسه.
+            // بذلك لا نحمّل جسم الملف في الذاكرة (كان يُحمَّل 227MB ويتجمد).
+            callback.invoke(
+                newExtractorLink(
+                    "arabxnsex",
+                    "arabxn${if (q != Qualities.Unknown.value) " • ${q}p" else ""}",
+                    fixUrl(getFile),
+                    ExtractorLinkType.VIDEO
+                ) {
+                    this.quality = q
+                    this.referer = mainUrl
+                    this.headers = headers
+                }
+            )
+            found = true
         }
 
         return found
