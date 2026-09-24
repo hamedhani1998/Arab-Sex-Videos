@@ -27,7 +27,7 @@ class ArabXNSexProvider : MainAPI() {
     )
 
     private val mainSections = listOf(
-        // أقسام بمحتوى أجنبي/إنجليزي (مترجم للعربية): arabxn متخصص في المحتوى الأجنبي المترجم
+        // كلها أقسام محتواها أجنبي/إنجليزي (مترجم للعربية): الموقع متخصص في المحتوى الأجنبي المترجم
         "سكس اجنبي" to "/categories/سكس-اجنبي/",
         "سكس مترجم" to "/categories/سكس-مترجم/",
         "xnxx مترجم" to "/categories/xnxx-مترجم/",
@@ -48,7 +48,7 @@ class ArabXNSexProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val lists = if (page <= 1) buildList {
-            add(HomePageList("أحدث مقاطع arabxn.sex", fetchItems(mainUrl)))
+            // نبدأ بالمحتوى الأجنبي (مطلوب المستخدم) ثم نكمل بالأقسام الأجنبية، وأخيراً الأحدث الأجنبية كذلك
             for ((label, path) in mainSections) {
                 add(HomePageList(label, fetchItems("$mainUrl$path")))
             }
@@ -101,10 +101,8 @@ override suspend fun loadLinks(
         var found = false
 
         suspend fun emit(url: String, quality: Int = Qualities.Unknown.value) {
-            val clean = url.removePrefix("function/0/")
-            val type = if (clean.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
             callback.invoke(
-                newExtractorLink("arabxnsex", serverHost(clean), fixUrl(clean), type) {
+                newExtractorLink("arabxnsex", serverHost(url), url, ExtractorLinkType.VIDEO) {
                     this.quality = quality
                     this.referer = mainUrl
                 }
@@ -112,46 +110,17 @@ override suspend fun loadLinks(
             found = true
         }
 
+        // المصدر الحي الوحيد: JSON-LD "contentUrl" (get_file بهاش حي يوجّه 302 إلى cdn.arabxn.sex)
+        // استخراج مباشر من نص الصفحة دون حلقات أو طلبات إضافية — أسرع منطق ممكن
         val raw = app.get(data, headers = defaultHeaders).text
-
-        // 1) المصدر الحي: JSON-LD "contentUrl" — get_file بهاش حي يوجّه 302 إلى cdn.arabxn.sex (mp4)
-        val jsonLdContent = Regex(""""contentUrl"\s*:\s*"([^"]+)"""")
+        val src = Regex(""""contentUrl"\s*:\s*"([^"]+)"""")
             .find(raw)?.groupValues?.get(1)
-        if (jsonLdContent != null && (jsonLdContent.contains(".mp4") || jsonLdContent.contains(".m3u8"))) {
-            emit(fixUrl(jsonLdContent))
-        }
+            ?.let {
+                if (it.contains(".mp4") || it.contains(".m3u8")) it else null
+            } ?: return found
 
-        // 2) flashvars: video_url: 'function/0/https://...get_file/...mp4/' — الهاش في flashvars قد يكون ميتاً
-        //    يُطلق كملاذ أخير بدون بادئة function/0 (يوجّه 302 إلى cdn عند عمله)
-        val native = Regex("""video_(alt_)?url\s*:\s*'([^']*)'""", RegexOption.IGNORE_CASE)
-            .findAll(raw).map {
-                val isAlt = it.groups[1] != null
-                Triple(isAlt, it.groupValues[2], qualityFromText(isAlt, raw))
-            }.distinctBy { it.second }
-        for ((_, url, q) in native) {
-            val u = url.removePrefix("function/0/")
-            if (u.contains(".mp4") || u.contains(".m3u8")) emit(u, q)
-        }
-
-        // روابط خام داخل التفاصيل (get_file بكلا الهاشتين)
-        for (a in Regex("""https?://[^\s"']+get_file[^\s"']*\.mp4[^\s"']*""", RegexOption.IGNORE_CASE)
-            .findAll(raw).map { it.value }.distinct()) {
-            emit(a)
-        }
-        for (a in Regex("""https?://[^\s"']+\.(?:m3u8)[^\s"']*""", RegexOption.IGNORE_CASE)
-            .findAll(raw).map { it.value }.distinct()) {
-            emit(a)
-        }
-
+        emit(src)
         return found
-    }
-
-    /** استخراج الجودة من نص التسمية '480p' / '720p' / '360p' ... */
-    private fun qualityFromText(isAlt: Boolean, raw: String): Int {
-        val key = if (isAlt) "video_alt_url_text" else "video_url_text"
-        val label = Regex(key + """\s*:\s*'([^']*)'""").find(raw)?.groupValues?.get(1)
-        val num = label?.let { Regex("""(\d{3,4})p?""").find(it)?.groupValues?.get(1)?.toIntOrNull() }
-        return num ?: Qualities.Unknown.value
     }
 
     private fun Element.toSearchResponse(): SearchResponse? {
