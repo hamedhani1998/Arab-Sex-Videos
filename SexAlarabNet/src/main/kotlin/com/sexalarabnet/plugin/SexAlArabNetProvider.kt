@@ -29,13 +29,15 @@ class SexAlArabNetProvider : MainAPI() {
     )
 
     private val mainSections = listOf(
-        // بدون trailing slash: الموقع يعيد 308 من "/فئة/شريحة/" إلى بدون slash
-        "سكس مترجم" to "/category/video/سكس-مترجم",
-        "سكس عربي" to "/category/video/سكس-عربي",
-        "سكس مصري" to "/category/video/سكس-مصري",
-        "سكس اخوات" to "/category/video/سكس-اخوات",
-        "سكس امهات" to "/category/video/سكس-امهات",
-        "سكس محارم" to "/category/video/سكس-محارم"
+        // أقسام أجنبية (غير عربية): الموقع يعيد 308 من "/فئة/شريحة/" إلى بدون slash
+        "سكس مترجم" to "/category/video/سكس-مترجم",      // أفلام أجنبية مترجمة للعربية
+        "سكس اجنبي" to "/category/video/سكس-اجنبي",
+        "سكس هندي" to "/category/video/سكس-هندي",
+        "سحاق" to "/category/video/سحاق",
+        "تبادل" to "/category/video/تبادل",
+        "سكس جماعي" to "/category/video/سكس-جماعي",
+        "سكس دياثه" to "/category/video/سكس-دياثه",
+        "سكس لايف" to "/category/video/سكس-لايف"
     )
 
     private suspend fun fetchItems(url: String): List<SearchResponse> {
@@ -80,7 +82,7 @@ class SexAlArabNetProvider : MainAPI() {
             ?: document.selectFirst("img")?.attr("src")
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
-            this.posterUrl = poster?.let { fixUrl(it) }
+            this.posterUrl = poster?.let { relay(it) }
             this.plot = document.selectFirst("meta[name=description]")?.attr("content")
         }
     }
@@ -162,7 +164,19 @@ class SexAlArabNetProvider : MainAPI() {
         val poster = this.selectFirst("img")?.attr("src")
             ?: this.selectFirst("img")?.attr("data-src")
         return newMovieSearchResponse(rawTitle, fixUrl(href), TvType.NSFW) {
-            this.posterUrl = poster?.let { fixUrl(it) }
+            this.posterUrl = poster?.let { relay(it) }
         }
+    }
+
+    /**
+     * تمرير صور api.sexalarab.net عبر وسيط DuckDuckGo:
+     * الصور الأصلية على api.sexalarab.net قد تكون محجوبة/بطيئة في بعض الشبكات
+     * (تظهر البطاقة بإطار أسود حتى تُحمّل الصورة). الوسيط يعيد نفس الصورة
+     * كاملة عبر نطاق عام موثوق.
+     */
+    private fun relay(url: String): String {
+        if (!url.contains("api.sexalarab.net")) return fixUrl(url)
+        val encoded = java.net.URLEncoder.encode(fixUrl(url), "UTF-8")
+        return "https://proxy.duckduckgo.com/iu/?u=$encoded&f=1"
     }
 }
