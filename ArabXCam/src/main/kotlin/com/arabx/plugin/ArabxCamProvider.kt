@@ -37,10 +37,13 @@ class ArabxCamProvider : MainAPI() {
 
     private suspend fun fetchItems(url: String): List<SearchResponse> {
         return try {
-            app.get(url, headers = defaultHeaders).document
-                .select(".item, article, .post, .video-item")
-                .mapNotNull { it.toSearchResponse() }
-                .distinctBy { it.name }
+            // مهلة قصيرة لكل صفحة — لا تُعلق القائمة بانتظار صفحة بطيئة/محجوبة
+            kotlinx.coroutines.withTimeout(8000) {
+                app.get(url, headers = defaultHeaders).document
+                    .select(".item, article, .post, .video-item")
+                    .mapNotNull { it.toSearchResponse() }
+                    .distinctBy { it.name }
+            }
         } catch (_: Exception) {
             emptyList()
         }
