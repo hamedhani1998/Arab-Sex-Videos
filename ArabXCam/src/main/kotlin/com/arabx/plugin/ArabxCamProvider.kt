@@ -10,15 +10,17 @@ import org.jsoup.nodes.Element
 /**
  * عرب اكس — arabx.cam
  *
- * القائمة:  https://www.arabx.cam/   (بطاقات <div class="item">، روابط /<slug>/)
- * الأقسام:  /most-popular/  /top-rated/  /latest-updates/N/  و /categories/<قسم>/
- * البحث:    /search/?q=… (نتائج فعلية)
- * التفاصيل: iframe https://playeriz.com/embed-<id>.html
- * المشغل:   الكود المضغوط eval(function(p,a,c,k,e,d){…}) في embed يحوي
- *           master.m3u8 على s1.playiri.com — يُفكّ بمحلل أقواس متوازنة
- *           (لا regex DOTALL: يسبب StackOverflowError) ثم يُبثّ الرابط.
+ * القائمة/PAGE:  div.item  +  strong.title  +  img.thumb + div.rating
+ * الأقسام:       /latest-updates/  /most-popular/  /top-rated/  /categories/<قسم>/
+ * البحث:         /search/?q=…
+ * التفاصيل:      iframe https://playeriz.com/embed-<id>.html
+ * المشغل:        * KVS get_file (mp4) في سكربت التفاصيل — يعمل فقط لو get_file/1/<md5>/3000/
+ *                * أو صفحة embed playeriz يجرّبها محلياً (unpackPacked) لإيجاد master.m3u8
+ *                * أو روابط mp4/m3u8 مباشرة في سكربتات الصفحة
+ * كلها تحل محلياً — لا حاجة لمشغل خارجي/إضافة extractor.
  */
 class ArabxCamProvider : MainAPI() {
+    private val TAG = "arabx"
     override var mainUrl = "https://www.arabx.cam"
     override var name = "عرب اكس"
     override val supportedTypes = setOf(TvType.NSFW)
@@ -31,19 +33,18 @@ class ArabxCamProvider : MainAPI() {
         "Accept-Language" to "ar,en-US;q=0.8"
     )
 
-    /** المرجع يجب أن يكون ASCII فقط — مسار عربي في الـ referer يرمي IllegalArgumentException */
+    /** المرجع ASCII فقط — مسار عربي في الـ referer يرمي IllegalArgumentException قبل الطلب */
     private fun safeReferer(): String =
         Regex("""https?://[^/]+""").find(mainUrl)?.value ?: mainUrl
 
+    // ---------- الواجهة الرئيسية ----------
+
     private suspend fun fetchItems(url: String): List<SearchResponse> {
         return try {
-            // مهلة قصيرة لكل صفحة — لا تُعلق القائمة بانتظار صفحة بطيئة/محجوبة
             kotlinx.coroutines.withTimeout(8000) {
-                app.get(url, headers = defaultHeaders).document
-                    .select(".item, article, .post, .video-item")
-                    .mapNotNull { it.toSearchResponse() }
-                    .distinctBy { it.name }
-            }
+                val doc = app.get(url, headers = defaultHeaders).document
+                doc.select("div.item").mapNotNull { it.toSearchResponse() }
+            }.distinctBy { it.name }
         } catch (_: Exception) {
             emptyList()
         }
@@ -51,8 +52,8 @@ class ArabxCamProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val lists = if (page <= 1) {
-            // جلب متوازٍ لكل الأقسام — عند شبكة متعثرة (timeout) يتفادى تراكم التأخير التسلسلي
-            kotlinx.coroutines.coroutineScope {
+            // جلب متوازٍ لكل الأقسام — شبكة متعثرة لا تُراكم التأخر التسلسلي
+            coroutineScope {
                 val sections = listOf(
                     "أحدث أفلام عرب اكس" to mainUrl,
                     "الأعلى مشاهدة" to "$mainUrl/most-popular/",
@@ -67,43 +68,43 @@ class ArabxCamProvider : MainAPI() {
                 }.awaitAll().map { (label, items) -> HomePageList(label, items) }
             }
         } else buildList {
-            add(HomePageList("أحدث أفلام عرب اكس — صفحة $page", fetchItems("$mainUrl/latest-updates/$page/")))
+            add(HomePageList("أحدث أفلام عرب اكس — صفحة $page", fetchItems("$mainUrl/latest-updates/page/$page/")))
         }
         return newHomePageResponse(lists)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val document = try {
-            app.get("$mainUrl/search/?q=${query.trim()}", headers = defaultHeaders).document
+        return try {
+            val doc = app.get("$mainUrl/search/?q=${query.trim()}", headers = defaultHeaders).document
+            doc.select("div.item").mapNotNull { it.toSearchResponse() }
         } catch (_: Exception) {
-            return emptyList()
+            emptyList()
         }
-        return document.select(".item, article, .post, .video-item").mapNotNull { it.toSearchResponse() }
     }
+
+    // ---------- التفاصيل ----------
 
     override suspend fun load(url: String): LoadResponse? {
-        val document = app.get(url, headers = defaultHeaders).document
-
-        val title = (document.selectFirst("h1.htitle, h1.entry-title, h1.title, h1")?.text()
-            ?: document.title()).let { cleanTitle(it) }
-            .takeIf { it.isNotBlank() }
-            ?: return null
-
-        val poster = document.selectFirst("meta[property=og:image]")?.attr("content")
-            ?: document.selectFirst("img.poster, .single-poster img, img[itemprop=image]")?.attr("src")
-            ?: document.selectFirst("img.thumb")?.attr("data-original")
-            ?: document.selectFirst("img")?.attr("src")
-
-        return newMovieLoadResponse(title, url, TvType.NSFW, url) {
-            this.posterUrl = poster?.let { fixUrl(it) }
-            this.plot = document.selectFirst("meta[name=description]")?.attr("content")
+        return try {
+            val doc = app.get(url, headers = defaultHeaders).document
+            val title = doc.selectFirst("h1.htitle")?.text()?.trim()
+                ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
+                ?: doc.title().substringBefore(" - ").trim()
+                ?: return null
+            val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
+                ?: doc.selectFirst("img.thumb")?.attr("data-original")
+                ?: doc.selectFirst("img.poster, .single-poster img")?.attr("src")
+                ?: doc.selectFirst("img")?.attr("src")
+            newMovieLoadResponse(clean(title), url, TvType.NSFW, url) {
+                this.posterUrl = poster?.let { fixUrl(it) }
+                this.plot = doc.selectFirst("meta[name=description]")?.attr("content")
+            }
+        } catch (_: Exception) {
+            null
         }
     }
 
-    private fun serverHost(url: String): String {
-        val host = Regex("""https?://([^/:]+)""").find(url)?.groupValues?.get(1)
-        return host?.removePrefix("www.") ?: "سيرفر"
-    }
+    // ---------- روابط التشغيل (محلية فقط) ----------
 
     override suspend fun loadLinks(
         data: String,
@@ -114,7 +115,7 @@ class ArabxCamProvider : MainAPI() {
         var found = false
 
         suspend fun emit(url: String, quality: Int = Qualities.Unknown.value) {
-            // حدد النوع صراحة: m3u8 -> M3U8 (وإلا الاستدلال بالـ path ينتهي بـ ?token فيخرج VIDEO -> Source error)
+            // تحديد النوع صراحة — m3u8 أم mp4 (لا استدلال بالـ path فينكسر مع ?token)
             val type = if (url.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
             callback.invoke(
                 newExtractorLink("arabx", serverHost(url), url, type) {
@@ -125,87 +126,139 @@ class ArabxCamProvider : MainAPI() {
             found = true
         }
 
-        // جلب صفحة التفاصيل مرة واحدة فقط — نعيد استخدام نصها لكل التحليلات
-        val resp = try {
-            app.get(data, headers = defaultHeaders)
+        val doc = try {
+            app.get(data, headers = defaultHeaders).document
         } catch (_: Exception) {
             return false
         }
-        val raw = resp.text
-        val document = resp.document
+        val raw = doc.html()
 
-        // ═══ 1) embed playeriz أولاً — المسار الحقيقي. استخراج محلي فقط (unpackPacked).
-        if (!found) {
-            android.util.Log.i("arabx", "loadLinks: مسح embeds…")
-            for (iframe in document.select("iframe[src]")) {
-                if (found) break
-                val src = iframe.attr("src").ifBlank { continue }
-                // تجاهل إطارات الإعلانات فقط (لا تعتمد كلمة "ad" الـ ضيقة — تستبعد روابط حقيقية)
-                if (src.contains("google") || src.contains("doubleclick") || src.contains("propaganda")) continue
-                val resolved = fixUrl(src)
-                android.util.Log.i("arabx", "embed try: $resolved")
-                // مهلة قصيرة للجلب — لو تعثّر الـ embed (شبكة/سيرفر)، ننتقل سريعاً للبديل
-                // بدل تعليق 15+ ثانية (كما يظهر timeout في السجل).
-                val html = try {
-                    kotlinx.coroutines.withTimeout(8000) {
-                        app.get(resolved, headers = defaultHeaders + ("Referer" to safeReferer())).text
-                    }
-                } catch (e: Exception) {
-                    android.util.Log.w("arabx", "embed fetch fail (${e.javaClass.simpleName}): ${e.message}")
-                    continue
-                }
-                val unpacked = unpackPacked(html)
-                if (unpacked != null) {
-                    findMasterM3U8(unpacked)?.let {
-                        android.util.Log.i("arabx", "unpacked master: $it")
-                        emit(it)
-                    }
-                } else {
-                    android.util.Log.w("arabx", "no packed eval في embed")
+        // ═══ 1) روابط get_file في سكربت التفاصيل (KVS): video_url / video_alt_url / hd
+        //        تعمل فقط لو get_file/1/<md532>/3000/ (تلك تعيد 302 إلى الملف الفعلي).
+        val candScript = doc.select("script").map { it.html() }
+            .firstOrNull { it.contains("video_url") && it.contains("get_file") }
+        if (candScript != null) {
+            listOf(
+                rgx(candScript, "video_url") to rgx(candScript, "video_url_text"),
+                rgx(candScript, "video_alt_url") to rgx(candScript, "video_alt_url_text"),
+                rgx(candScript, "video_alt_url2") to rgx(candScript, "video_alt_url2_text"),
+                rgx(candScript, "video_hd_url") to rgx(candScript, "video_hd_url_text")
+            ).forEach { (url, q) ->
+                if (url != null && isWorkingGetFile(url)) {
+                    android.util.Log.i(TAG, "M1 emit url=${url.take(70)} q=$q")
+                    emit(cln(url), qualityFromLabel(q))
                 }
             }
+            if (found) return true
         }
-        if (found) return true
 
-        // ═══ 2) إحتياط: روابط free .m3u8/.mp4 قابلة للتشغيل الفعلي في نفس صفحة التفاصيل
-        android.util.Log.i("arabx", "no embed link — محاولة الروابط الحرة في التفاصيل")
-        for (el in document.select("video source[src], video[src], source[src]")) {
+        // ═══ 2) مشغل embed (playeriz / محلي KVS) — نجرّبه محلياً فقط
+        android.util.Log.i(TAG, "M2 مسح embeds / twitter:player…")
+        val embedUrl = doc.select("iframe[src]").map { it.attr("src") }
+            .firstOrNull { it.isNotBlank() && !it.contains("google") && !it.contains("doubleclick") && !it.contains("propaganda") }
+            ?: doc.selectFirst("meta[name='twitter:player']")?.attr("content")
+        if (embedUrl != null) {
+            val resolved = fixUrl(embedUrl)
+            android.util.Log.i(TAG, "embed try: $resolved")
+            val html = try {
+                kotlinx.coroutines.withTimeout(8000) {
+                    app.get(resolved, headers = defaultHeaders + ("Referer" to safeReferer())).text
+                }
+            } catch (e: Exception) {
+                android.util.Log.w(TAG, "embed fetch fail (${e.javaClass.simpleName}): ${e.message}")
+                null
+            }
+            if (html != null) {
+                android.util.Log.i(TAG, "embed fetched ${html.length}B")
+                // 2a) كود مضغوط → master.m3u8
+                unpackPacked(html)?.let { unpacked ->
+                    findMasterM3U8(unpacked)?.let {
+                        android.util.Log.i(TAG, "unpacked master: $it")
+                        emit(it)
+                    }
+                }
+                // 2b) روابط free داخل صفحة الـ embed (mp4/m3u8)
+                if (!found) {
+                    Regex("""https?://[^\s"'<>]+\.(?:m3u8|mp4)[^\s"'<>]*""", RegexOption.IGNORE_CASE)
+                        .findAll(html).map { it.value }.distinct()
+                        .filterNot { it.endsWith(".jpg") || it.endsWith(".png") || it.endsWith(".webp") }
+                        .forEach { emit(it) }
+                }
+                if (found) return true
+            }
+        }
+
+        // ═══ 3) HTML5 <video>/<source> في التفاصيل
+        android.util.Log.i(TAG, "M3 video tags…")
+        for (el in doc.select("video source[src], video[src], source[src]")) {
             val src = el.attr("src").ifBlank { el.attr("data-src") }
             if (src.isNotBlank() && (src.contains(".mp4") || src.contains(".m3u8"))) emit(fixUrl(src))
         }
-        for (a in document.select("a[href]")) {
-            val href = a.attr("href")
-            if ((href.contains(".mp4") || href.contains(".m3u8")) && !href.endsWith(".jpg") && !href.endsWith(".png") && !href.endsWith(".webp")) {
-                emit(fixUrl(href))
-            }
-        }
+        if (found) return true
 
-        // 2b) روابط free في نص التفاصيل مباشرة (احتياط أخير).
-        //     get_file خام (دون v-acctoken) يعطي Source error في اللاعب — نستبعده،
-        //     ونبقي get_file المُوسوم بتوكن (يظهر في الصفحة ويُقبل عبر Cronet).
-        if (!found) {
-            val freeInText = Regex("""https?://[^\s"'<>]+\.(?:m3u8|mp4)[^\s"'<>]*""", RegexOption.IGNORE_CASE)
-                .findAll(raw).map { it.value }.distinct()
-                .filterNot {
-                    it.endsWith(".jpg") || it.endsWith(".png") || it.endsWith(".webp") ||
-                        (it.contains("get_file") && !it.contains("v-acctoken"))
-                }
-            for (c in freeInText) {
-                android.util.Log.i("arabx", "free-link fallback: $c")
-                emit(c)
-            }
-        }
+        // ═══ 4) روابط mp4/m3u8 مباشرة في نصوص السكربتات (استبعاد get_file — يُعالج أعلاه أو 403)
+        android.util.Log.i(TAG, "M4 direct urls في scripts…")
+        val scriptTexts = doc.select("script").joinToString("\n") { it.data() }
+        Regex("""https?://[^\s"'<>]+\.(?:mp4|m3u8)[^\s"'<>]*""", RegexOption.IGNORE_CASE)
+            .findAll(scriptTexts).map { it.value }.distinct()
+            .filter { !it.contains("get_file") }
+            .filterNot { it.endsWith(".jpg") || it.endsWith(".png") || it.endsWith(".webp") }
+            .forEach { emit(it) }
 
+        android.util.Log.i(TAG, "loadLinks done found=$found")
         return found
     }
 
-    /** استخراج الجودة من نص التسمية النمطية: '480p' / '720p' / '360p' ... */
-    private fun qualityFromText(isAlt: Boolean, raw: String): Int {
-        val key = if (isAlt) "video_alt_url_text" else "video_url_text"
-        val label = Regex(key + """\s*:\s*'([^']*)'""").find(raw)?.groupValues?.get(1)
-        val num = label?.let { Regex("""(\d{3,4})p?""").find(it)?.groupValues?.get(1)?.toIntOrNull() }
+    // ---------- أدوات ----------
+
+    private fun serverHost(url: String): String {
+        val host = Regex("""https?://([^/:]+)""").find(url)?.groupValues?.get(1)
+        return host?.removePrefix("www.") ?: "سيرفر"
+    }
+
+    private fun qualityFromLabel(q: String?): Int {
+        if (q.isNullOrBlank()) return Qualities.Unknown.value
+        val num = Regex("""(\d{3,4})p?""").find(q)?.groupValues?.get(1)?.toIntOrNull()
         return num ?: Qualities.Unknown.value
     }
+
+    private fun rgx(script: String, key: String): String? {
+        val m = Regex("""$key\s*[:=]\s*['"]([^'"]+)['"]""").find(script) ?: return null
+        return m.groupValues[1].ifBlank { null }
+    }
+
+    /** get_file يعمل فقط عندما يحمل md5 (get_file/1/<md532>/3000/…) — تلك تعيد 302 للملف. */
+    private fun isWorkingGetFile(url: String): Boolean {
+        return !url.contains("get_file") || Regex("""get_file/1/[a-f0-9]{32}/3000/""").containsMatchIn(url)
+    }
+
+    /** كشف ترميز KVS: function/0/<base64> — فك؛ و https/ و // و / */
+    private fun cln(url: String): String {
+        val decoded = when {
+            url.startsWith("function/0/") -> {
+                try {
+                    android.util.Base64.decode(url.removePrefix("function/0/"), android.util.Base64.DEFAULT)
+                        .toString(Charsets.UTF_8)
+                } catch (_: Exception) {
+                    url.removePrefix("function/0/")
+                }
+            }
+            else -> url
+        }
+        return when {
+            decoded.startsWith("//") -> "https:$decoded"
+            decoded.startsWith("https/") -> "https://${decoded.removePrefix("https/")}"
+            else -> decoded
+        }
+    }
+
+    private fun fixUrl(url: String): String = when {
+        url.startsWith("//") -> "https:$url"
+        url.startsWith("/") -> "$mainUrl$url"
+        else -> url
+    }
+
+    private fun clean(s: String): String = s.trim().replace(Regex("""\s+"""), " ")
 
     // ---------- فكّ الكود المضغوط (Dean Edwards packer) ----------
 
@@ -213,8 +266,7 @@ class ArabxCamProvider : MainAPI() {
         val re = Regex("""eval\(function\s*\(p,a,c,k,e,d\)""")
         val m = re.find(js) ?: return null
 
-        // مشي الأقواس المتوازنة حتى قوس إغلاق eval(...) — تجنّب regex DOTALL (StackOverflowError)
-        // نبدأ من قوس "eval(" نفسه: عدّد كل '(' / ')' وأغلق عند عمق 0
+        // مشي الأقواس المتوازنة إلى قوس إغلاق eval — تجنّب regex DOTALL (StackOverflowError)
         var depth = 0
         var inStr: Char? = null
         var i = m.range.first + 4 // عند '(' بعد eval(
@@ -235,7 +287,6 @@ class ArabxCamProvider : MainAPI() {
         if (depth != 0 || i >= js.length) return null
         val close = i
 
-        // حدود وسائط الاستدعاء: آخر "}(" قبل الإغلاق
         val argsOpen = js.lastIndexOf("}(", close)
         if (argsOpen <= m.range.first) return null
         val args = splitTopLevel(js.substring(argsOpen + 2, close))
@@ -245,24 +296,17 @@ class ArabxCamProvider : MainAPI() {
         if (radix !in 2..36) return null
         val count = args.getOrNull(2)?.trim()?.toIntOrNull() ?: return null
         val packed = unescapeEval(args[0].trim())
-        val dictStr = (args.getOrNull(3) ?: "")
-            .substringAfter("'").substringBeforeLast("'")
+        val dictStr = (args.getOrNull(3) ?: "").substringAfter("'").substringBeforeLast("'")
         val dict = dictStr.split("|")
 
-        // التبديل التنازلي تماماً مثل JS: while(c--) من count-1 إلى 0.
-        // لكن لا نستخدم \b حدود الكلمات: في الرموز base-36 هناك تصادم
-        // (مثل "2" داخل "28" أو "0" داخل "0.3") يفسد روابط s1.playiri.com
-        // التي تحمل أرقاماً مثل ",l,n,h,.urlset" و "i=0.3". نستبدل كل
-        // تسلسل [0-9a-z]+ مقابل الخريطة بمسح واحد بدل استبدال كل مفتاح.
+        // استبدال كل مفتاح base-N بخريطة واحدة (لا \b — تصادم "2" داخل "28" يفسد روابط s1.playiri)
         val map = HashMap<String, String>()
         for (c in (count - 1) downTo 0) {
             val key = if (radix == 16) Integer.toHexString(c) else c.toString(radix)
             val word = dict.getOrNull(c)
-            if (!word.isNullOrEmpty() && word != "\\0") {
-                map[key] = word
-            }
+            if (!word.isNullOrEmpty() && word != "\\0") map[key] = word
         }
-        return packed.replace(Regex("[0-9a-z]+")) { m -> map[m.value] ?: m.value }
+        return packed.replace(Regex("[0-9a-z]+")) { mm -> map[mm.value] ?: mm.value }
     }
 
     private fun splitTopLevel(s: String): List<String> {
@@ -303,30 +347,33 @@ class ArabxCamProvider : MainAPI() {
         return re.find(unpacked)?.value
     }
 
-    /** استخراج اسم الفيلم من عنوان البطاقة:
-     *  صيغة attr-title: "سكس مترجم - <اسم الفيلم> - سكس امهات" أو "<اسم> - سكس مترجم | تصنيف"
-     *  الجزء الجوهري غالباً هو الفهرس الثاني عند وجود " - ", وأولاً عند غيابه. */
-    private fun cleanTitle(raw: String): String {
-        var t = raw.trim()
-            .substringBefore(" | ")
-            .trim()
-        val parts = t.split(" - ").map { it.trim() }.filter { it.isNotBlank() }
-        t = if (parts.size >= 3) parts[1] else parts.firstOrNull() ?: t
-        // إزالة لاحقات تصنيف
-        t = t.replace("مترجم", "").replace("مدبلج", "").trim()
-        return t.ifBlank { parts.firstOrNull() ?: raw }
-    }
+    // ---------- البطاقة ----------
 
     private fun Element.toSearchResponse(): SearchResponse? {
-        val link = this.selectFirst("a[href]") ?: return null
-        val href = link.attr("href").ifBlank { return null }
-        val rawTitle = link.attr("title").ifBlank { link.text().ifBlank { return null } }
-        val title = cleanTitle(rawTitle)
-        val poster = this.selectFirst("img.thumb")?.attr("data-original")
-            ?: this.selectFirst("img.thumb")?.attr("data-webp")
-            ?: this.selectFirst("img")?.attr("src")
-        return newMovieSearchResponse(title, href, TvType.NSFW) {
+        val a = this.selectFirst("a") ?: return null
+        val href = a.attr("href").ifBlank { return null }
+        val title = this.selectFirst("strong.title")?.text()?.trim()
+            ?: a.attr("title").ifBlank { a.text().ifBlank { return null } }
+        val poster = extractPoster(this)
+        val rating = this.selectFirst("div.rating")?.text()?.trim()?.replace("%", "")
+        return newMovieSearchResponse(clean(title), href, TvType.NSFW) {
             this.posterUrl = poster?.let { fixUrl(it) }
+            if (!rating.isNullOrBlank()) this.score = Score.from(rating, 100)
         }
+    }
+
+    private fun extractPoster(item: Element): String? {
+        val img = item.selectFirst("img.thumb")
+            ?: item.selectFirst("img[data-original]")
+            ?: item.selectFirst("img[data-src]")
+            ?: item.selectFirst("img.lazy")
+            ?: item.selectFirst("img")
+            ?: return null
+        return listOf("data-original", "data-src", "data-webp", "src")
+            .firstNotNullOfOrNull { attr ->
+                img.attr(attr).takeIf {
+                    it.isNotBlank() && !it.contains("placeholder") && !it.contains("data:image")
+                }
+            }
     }
 }
