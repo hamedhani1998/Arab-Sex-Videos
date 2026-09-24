@@ -100,7 +100,8 @@ override suspend fun loadLinks(
     ): Boolean {
         var found = false
 
-        // جلب صفحة التفاصيل مرة واحدة فقط — ينشئ جلسة (PHPSESSID) ويمنحنا المحتوى
+        // جلب صفحة التفاصيل مرة واحدة — تنشئ جلسة (PHPSESSID) وتمنحنا المحتوى.
+        // (البحث أثبت أن اللاعب/MediaHTTPService لا ينقل Cookie إلينا، لذا نحل 302 بأنفسنا.)
         val resp = try {
             app.get(data, headers = defaultHeaders)
         } catch (_: Exception) {
@@ -108,7 +109,7 @@ override suspend fun loadLinks(
         }
         val raw = resp.text
 
-        // التقاط جلسة PHPSESSID من Set-Cookie لتسليمها للمشغل مع رابط get_file
+        // التقاط جلسة PHPSESSID: مطلوبة فقط لطلب HEAD داخل المزوّد (لا تصل للاعب).
         val session = resp.headers["Set-Cookie"]
             ?.substringAfter("PHPSESSID=", "")
             ?.substringBefore(";")
@@ -121,7 +122,8 @@ override suspend fun loadLinks(
                 ?.groupValues?.get(1)?.toIntOrNull()
             return num ?: Qualities.Unknown.value
         }
-        // نجمع أزواج (رابط، جودة) محتملة
+
+        // نجمع أزواج (رابط get_file، جودة)
         val pairs = LinkedHashMap<String, Int>()
         Regex(""""contentUrl"\s*:\s*"([^"]+)"""").find(raw)?.also {
             pairs[it.groupValues[1]] = Qualities.Unknown.value
@@ -138,25 +140,35 @@ override suspend fun loadLinks(
         Regex("""https://arabxn\.sex/get_file/[^\s"'<>]+""")
             .findAll(raw).forEach { pairs.putIfAbsent(it.value.trimEnd('\\', '"', '\''), Qualities.Unknown.value) }
 
+        // حلّ 302 إلى رابط CDN النهائي (يحمل token بلا حاجة جلسة) عبر HEAD — بدون تحميل جسم الملف.
+        // الشغّل لا يعرف كيف يمرر Cookie، لذلك نسلّمه CDN مباشرة.
         for ((candidate, q) in pairs) {
             val getFile = candidate.removePrefix("function/0/")
             if (!getFile.contains(".mp4") && !getFile.contains(".m3u8")) continue
-            val headers = buildMap {
+            val reqHeaders = buildMap {
                 put("Referer", mainUrl)
                 cookieHeader?.let { put("Cookie", it) }
             }
-            // نسلّم رابط get_file مباشرة (مع cookie) — المشغل يتبع 302 إلى CDN بنفسه.
-            // بذلك لا نحمّل جسم الملف في الذاكرة (كان يُحمَّل 227MB ويتجمد).
+            val cdn = try {
+                val head = app.head(fixUrl(getFile), headers = reqHeaders)
+                // المتابعة التلقائية للـ redirect: url النهائي؛ وإلا نقرأ Location يدوياً
+                var finalUrl = head.url.toString()
+                val loc = head.headers["Location"]
+                if (!finalUrl.contains("cdn.arabxn.sex")) finalUrl = loc?.takeIf { it.contains(".mp4") }.orEmpty()
+                finalUrl
+            } catch (_: Exception) {
+                fixUrl(getFile) // احتياط: لو فشل HEAD نرسل get_file (قد ينجح بالصدفة لكن غالباً 410)
+            }
+            if (!cdn.contains(".mp4") && !cdn.contains(".m3u8")) continue
             callback.invoke(
                 newExtractorLink(
                     "arabxnsex",
                     "arabxn${if (q != Qualities.Unknown.value) " • ${q}p" else ""}",
-                    fixUrl(getFile),
+                    cdn,
                     ExtractorLinkType.VIDEO
                 ) {
                     this.quality = q
                     this.referer = mainUrl
-                    this.headers = headers
                 }
             )
             found = true

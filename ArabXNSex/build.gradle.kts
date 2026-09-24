@@ -1,4 +1,4 @@
-version = 6
+version = 7
 
 cloudstream {
     description = "arabxn.sex - أفلام إباحية عربية مترجمة"
