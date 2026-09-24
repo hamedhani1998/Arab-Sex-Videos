@@ -110,16 +110,52 @@ override suspend fun loadLinks(
             found = true
         }
 
-        // المصدر الحي الوحيد: JSON-LD "contentUrl" (get_file بهاش حي يوجّه 302 إلى cdn.arabxn.sex)
-        // استخراج مباشر من نص الصفحة دون حلقات أو طلبات إضافية — أسرع منطق ممكن
-        val raw = app.get(data, headers = defaultHeaders).text
-        val src = Regex(""""contentUrl"\s*:\s*"([^"]+)"""")
-            .find(raw)?.groupValues?.get(1)
-            ?.let {
-                if (it.contains(".mp4") || it.contains(".m3u8")) it else null
-            } ?: return found
+        // نزور الموقع أولاً حتى يُنشئ OkHttp جلسة (PHPSESSID) — بدونها get_file يرد 410 Gone
+        try {
+            app.get(mainUrl, headers = defaultHeaders)
+        } catch (_: Exception) {}
 
-        emit(src)
+        val raw = app.get(data, headers = defaultHeaders).text
+
+        // الهاشتان متغيّران لكل جلسة — نصِف كل get_file مع جودته من قرائن flashvars
+        val candidates = LinkedHashMap<String, Int>()
+
+        // 1) JSON-LD contentUrl (الجودة الافتراضية)
+        Regex(""""contentUrl"\s*:\s*"([^"]+)"""").find(raw)?.also {
+            candidates[it.groupValues[1]] = Qualities.Unknown.value
+        }
+
+        // 2) flashvars: video_url (مع video_url_text) و video_alt_url (مع video_alt_url_text) — هاتان الجودتان
+        Regex("""video_(alt_)?url\s*:\s*'function/0/([^']*)'""", RegexOption.IGNORE_CASE)
+            .findAll(raw).forEach {
+                val isAlt = it.groupValues[1].isNotEmpty()
+                val url = it.groupValues[2]
+                val key = if (isAlt) "video_alt_url_text" else "video_url_text"
+                val label = Regex(Regex.escape(key) + """\s*:\s*'([^']*)'""", RegexOption.IGNORE_CASE)
+                    .find(raw)?.groupValues?.get(1)
+                val q = label?.let {
+                    Regex("""(\d{3,4})p?""").find(it)?.groupValues?.get(1)?.toIntOrNull()
+                } ?: Qualities.Unknown.value
+                candidates.putIfAbsent(url, q)
+            }
+
+        // 3) أي get_file آخر غير مكرر
+        Regex("""https://arabxn\.sex/get_file/[^\s"'<>]+""")
+            .findAll(raw).forEach { candidates.putIfAbsent(it.value.trimEnd('\\', '"', '\''), Qualities.Unknown.value) }
+
+        // لكل مرشح: نتبّع 302 إلى CDN (cdn.arabxn.sex?token=..) داخل OkHttp المحمل بالجلسة،
+        // ونمرّر المشغل الرابط النهائي — لا يحتاج ExoPlayer لأي جلسة (CDN ب token فقط).
+        for ((candidate, q) in candidates) {
+            val getFile = candidate.removePrefix("function/0/")
+            if (!getFile.contains(".mp4") && !getFile.contains(".m3u8")) continue
+            val finalUrl = try {
+                app.get(getFile, referer = mainUrl).url
+            } catch (_: Exception) {
+                getFile
+            }
+            emit(finalUrl, q)
+        }
+
         return found
     }
 
