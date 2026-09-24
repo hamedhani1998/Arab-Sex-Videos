@@ -120,23 +120,37 @@ class ArabxCamProvider : MainAPI() {
         val raw = resp.text
         val document = resp.document
 
-        // 1) النمط الأصلي: flashvars في التفاصيل يحوي video_url + video_alt_url مباشرةً
-        //    (mp4 متدرج بأسماء جودة: video_url_text / video_alt_url_text). التوكن لازم (بدونه 403).
-        val native = Regex("""video_(alt_)?url\s*:\s*'([^']*)'""", RegexOption.IGNORE_CASE)
-            .findAll(raw).map {
-                val isAlt = it.groups[1] != null      // هو البديل (alt)؟
-                Triple(isAlt, it.groupValues[2], qualityFromText(isAlt, raw))
-            }.distinctBy { it.second }
-        for ((_, url, q) in native) {
-            // قد تأتي القيمة نسبة (function/0/...) — fixUrl تُكمل الأصل حتى لا يخرج رابط ناقص لا يشغّل
-            if (url.contains(".mp4") || url.contains(".m3u8")) emit(fixUrl(url), q)
+        // ═══ 1) embed playeriz أولاً — الفيديو الحقيقي (m3u8 على s1.playiri.com) داخل
+        //        eval مضغوط في صفحة الـ embed. أي mp4 في التفاصيل هو معاينة/ترتيبي لا يشغّل.
+        if (!found) {
+            android.util.Log.i("arabx", "loadLinks: مسح embeds…")
+            for (iframe in document.select("iframe[src]")) {
+                if (found) break
+                val src = iframe.attr("src").ifBlank { continue }
+                // تجاهل إطارات الإعلانات فقط (لا تعتمد كلمة "ad" الـ ضيقة)
+                if (src.contains("google") || src.contains("doubleclick") || src.contains("propaganda")) continue
+                android.util.Log.i("arabx", "embed try: $src")
+                val html = try {
+                    app.get(fixUrl(src), headers = defaultHeaders + ("Referer" to safeReferer())).text
+                } catch (e: Exception) {
+                    android.util.Log.w("arabx", "embed fetch fail: ${e.message}")
+                    continue
+                }
+                val unpacked = unpackPacked(html)
+                if (unpacked != null) {
+                    findMasterM3U8(unpacked)?.let {
+                        android.util.Log.i("arabx", "unpacked master: $it")
+                        emit(it)
+                    }
+                } else {
+                    android.util.Log.w("arabx", "no packed eval في embed")
+                }
+            }
         }
-
-        // نمط B يكتمل هنا: flashvars موجود → الجودتان mp4 جاهزتان، لا نحتاج
-        // embed إضافياً (المشغلان متنافيان). نعود فوراً لتسريع "جلب بيانات التشغيل".
         if (found) return true
 
-        // 2) روابط free في نفس صفحة التفاصيل (video/source/a[href]) — لا طلب ثانٍ
+        // ═══ 2) إحتياط: روابط free .m3u8/.mp4 قابلة للتشغيل الفعلي في نفس صفحة التفاصيل
+        android.util.Log.i("arabx", "no embed link — محاولة الروابط الحرة في التفاصيل")
         for (el in document.select("video source[src], video[src], source[src]")) {
             val src = el.attr("src").ifBlank { el.attr("data-src") }
             if (src.isNotBlank() && (src.contains(".mp4") || src.contains(".m3u8"))) emit(fixUrl(src))
@@ -148,39 +162,14 @@ class ArabxCamProvider : MainAPI() {
             }
         }
 
-        // 2b) روابط free في نص التفاصيل مباشرة (بعض الصفحات تضع mp4/m3u8 في سكربت أو نص خام)
+        // 2b) روابط free في نص التفاصيل مباشرة (احتياط أخير — mp4 مباشرة من get_file غالباً 403)
         if (!found) {
             val freeInText = Regex("""https?://[^\s"'<>]+\.(?:m3u8|mp4)[^\s"'<>]*""", RegexOption.IGNORE_CASE)
                 .findAll(raw).map { it.value }.distinct()
                 .filterNot { it.endsWith(".jpg") || it.endsWith(".png") || it.endsWith(".webp") }
-            for (c in freeInText) emit(c)
-        }
-        if (found) return true
-
-        // 3) embed playeriz — المشغل الحقيقي داخل eval مضغوط (فقط إن لم نعثر على شيء أعلاه).
-        //    يبقى التحميل هنا في الطلب الأخير (لا يتأخر ما عدا الـ embed نفسه) —
-        //    لكن نكتفي بأول embed ينتج رابطاً ونتوقف فوراً (لا نجرّب إعلانات لاحقة).
-        if (!found) {
-            for (iframe in document.select("iframe[src]")) {
-                // نتوقف فور العثور على رابط في embed سابق
-                if (found) break
-                val src = iframe.attr("src").ifBlank { continue }
-                // تجاهل إطارات الإعلانات — لا نضيع وقتاً عليها
-                if (src.contains("google") || src.contains("doubleclick") || src.contains("ad") || src.contains("propaganda")) continue
-                val html = try {
-                    app.get(fixUrl(src), headers = defaultHeaders + ("Referer" to safeReferer())).text
-                } catch (_: Exception) { continue }
-
-                // مسارات حرة إن وجدت
-                val plain = Regex("""https?://[^\s"']+\.(?:m3u8|mp4)[^\s"']*""", RegexOption.IGNORE_CASE)
-                    .findAll(html).map { it.value }.distinct()
-                    .filterNot { it.endsWith(".jpg") || it.endsWith(".png") || it.endsWith(".webp") }
-                for (c in plain) emit(c)
-
-                val unpacked = unpackPacked(html)
-                if (unpacked != null) {
-                    findMasterM3U8(unpacked)?.let { emit(it) }
-                }
+            for (c in freeInText) {
+                android.util.Log.i("arabx", "free-link fallback: $c")
+                emit(c)
             }
         }
 
