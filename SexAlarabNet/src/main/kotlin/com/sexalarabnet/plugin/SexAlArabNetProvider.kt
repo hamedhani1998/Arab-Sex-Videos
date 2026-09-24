@@ -29,12 +29,13 @@ class SexAlArabNetProvider : MainAPI() {
     )
 
     private val mainSections = listOf(
-        "سكس مترجم" to "/category/video/سكس-مترجم/",
-        "سكس عربي" to "/category/video/سكس-عربي/",
-        "سكس مصري" to "/category/video/سكس-مصري/",
-        "سكس اخوات" to "/category/video/سكس-اخوات/",
-        "سكس امهات" to "/category/video/سكس-امهات/",
-        "سكس محارم" to "/category/video/سكس-محارم/"
+        // بدون trailing slash: الموقع يعيد 308 من "/فئة/شريحة/" إلى بدون slash
+        "سكس مترجم" to "/category/video/سكس-مترجم",
+        "سكس عربي" to "/category/video/سكس-عربي",
+        "سكس مصري" to "/category/video/سكس-مصري",
+        "سكس اخوات" to "/category/video/سكس-اخوات",
+        "سكس امهات" to "/category/video/سكس-امهات",
+        "سكس محارم" to "/category/video/سكس-محارم"
     )
 
     private suspend fun fetchItems(url: String): List<SearchResponse> {
@@ -68,10 +69,11 @@ class SexAlArabNetProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         val document = app.get(url, headers = defaultHeaders).document
 
-        val title = document.selectFirst("h1, h2.entry-title")?.text()
-            ?.trim()
-            ?.ifBlank { null }
-            ?: document.title().substringBefore("|").trim().ifBlank { return null }
+        val title = (document.selectFirst("h1, h2.entry-title")?.text()
+            ?: document.title().substringBefore("|").trim())
+            ?.let { cleanTitle(it) }
+            ?: return null
+        if (title.isBlank()) return null
 
         val poster = document.selectFirst("meta[property=og:image]")?.attr("content")
             ?: document.selectFirst("img.poster, .poster img, img[itemprop=image]")?.attr("src")
@@ -81,6 +83,14 @@ class SexAlArabNetProvider : MainAPI() {
             this.posterUrl = poster?.let { fixUrl(it) }
             this.plot = document.selectFirst("meta[name=description]")?.attr("content")
         }
+    }
+
+    /** تنظيف العنوان: إزالة النقطة اللاحقة " ." والمسافات الزائدة */
+    private fun cleanTitle(raw: String): String {
+        return raw.trim()
+            .removeSuffix(" .")
+            .trim()
+            .replace(Regex("""\s+"""), " ")
     }
 
     private fun serverHost(url: String): String {
@@ -141,13 +151,18 @@ class SexAlArabNetProvider : MainAPI() {
 
     private fun Element.toSearchResponse(): SearchResponse? {
         val href = this.attr("href").ifBlank { return null }
-        val title = this.selectFirst("h3, .title, [alt]")?.text().orEmpty()
-            .ifBlank { this.attr("alt") }.trim()
-        val rawTitle = title.ifBlank { return null }
+        // العنوان في h3 داخل البطاقة؛ alt يأتي قبل h3 في DOM ويتيح "" لـ img,
+        // لذلك نخصص h3 أولاً ثم img[alt] ثم any img
+        val title = this.selectFirst("h3")?.text()
+            ?.ifBlank { null }
+            ?: this.selectFirst("[alt]")?.attr("alt")
+                ?.ifBlank { null }
+                ?: this.selectFirst("img")?.attr("alt")
+        val rawTitle = title?.let { cleanTitle(it) }?.ifBlank { null } ?: return null
         val poster = this.selectFirst("img")?.attr("src")
             ?: this.selectFirst("img")?.attr("data-src")
-        return newMovieSearchResponse(rawTitle.trim(), fixUrl(href), TvType.NSFW) {
-            this.posterUrl = poster
+        return newMovieSearchResponse(rawTitle, fixUrl(href), TvType.NSFW) {
+            this.posterUrl = poster?.let { fixUrl(it) }
         }
     }
 }
