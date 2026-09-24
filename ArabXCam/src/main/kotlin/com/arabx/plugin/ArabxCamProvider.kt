@@ -2,6 +2,9 @@ package com.arabx.plugin
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Element
 
 /**
@@ -44,14 +47,22 @@ class ArabxCamProvider : MainAPI() {
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val lists = if (page <= 1) buildList {
-            add(HomePageList("أحدث أفلام عرب اكس", fetchItems(mainUrl)))
-            add(HomePageList("الأعلى مشاهدة", fetchItems("$mainUrl/most-popular/")))
-            add(HomePageList("الأعلى تقييماً", fetchItems("$mainUrl/top-rated/")))
-            add(HomePageList("سكس مترجم", fetchItems("$mainUrl/categories/سكس-مترجم/")))
-            add(HomePageList("سكس امهات مترجم", fetchItems("$mainUrl/categories/سكس-امهات-مترجم/")))
-            add(HomePageList("سكس محارم", fetchItems("$mainUrl/categories/سكس-محارم/")))
-            add(HomePageList("سكس اخوات", fetchItems("$mainUrl/categories/سكس-اخوات/")))
+        val lists = if (page <= 1) {
+            // جلب متوازٍ لكل الأقسام — عند شبكة متعثرة (timeout) يتفادى تراكم التأخير التسلسلي
+            kotlinx.coroutines.coroutineScope {
+                val sections = listOf(
+                    "أحدث أفلام عرب اكس" to mainUrl,
+                    "الأعلى مشاهدة" to "$mainUrl/most-popular/",
+                    "الأعلى تقييماً" to "$mainUrl/top-rated/",
+                    "سكس مترجم" to "$mainUrl/categories/سكس-مترجم/",
+                    "سكس امهات مترجم" to "$mainUrl/categories/سكس-امهات-مترجم/",
+                    "سكس محارم" to "$mainUrl/categories/سكس-محارم/",
+                    "سكس اخوات" to "$mainUrl/categories/سكس-اخوات/"
+                )
+                sections.map { (label, url) ->
+                    async { label to fetchItems(url) }
+                }.awaitAll().map { (label, items) -> HomePageList(label, items) }
+            }
         } else buildList {
             add(HomePageList("أحدث أفلام عرب اكس — صفحة $page", fetchItems("$mainUrl/latest-updates/$page/")))
         }
