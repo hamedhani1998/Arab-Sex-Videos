@@ -41,11 +41,14 @@ class ArabxCamProvider : MainAPI() {
 
     private suspend fun fetchItems(url: String): List<SearchResponse> {
         return try {
-            kotlinx.coroutines.withTimeout(8000) {
+            kotlinx.coroutines.withTimeout(15000) {
                 val doc = app.get(url, headers = defaultHeaders).document
                 doc.select("div.item").mapNotNull { it.toSearchResponse() }
-            }.distinctBy { it.name }
-        } catch (_: Exception) {
+            }.distinctBy { it.name }.also {
+                android.util.Log.i(TAG, "fetchItems url=$url items=${it.size}")
+            }
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "fetchItems fail ${e.javaClass.simpleName}: ${e.message} url=$url")
             emptyList()
         }
     }
@@ -75,8 +78,10 @@ class ArabxCamProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         return try {
-            val doc = app.get("$mainUrl/search/?q=${query.trim()}", headers = defaultHeaders).document
-            doc.select("div.item").mapNotNull { it.toSearchResponse() }
+            kotlinx.coroutines.withTimeout(8000) {
+                val doc = app.get("$mainUrl/search/?q=${query.trim()}", headers = defaultHeaders).document
+                doc.select("div.item").mapNotNull { it.toSearchResponse() }
+            }.distinctBy { it.name }
         } catch (_: Exception) {
             emptyList()
         }
@@ -154,14 +159,20 @@ class ArabxCamProvider : MainAPI() {
 
         // ═══ 2) مشغل embed (playeriz / محلي KVS) — نجرّبه محلياً فقط
         android.util.Log.i(TAG, "M2 مسح embeds / twitter:player…")
-        val embedUrl = doc.select("iframe[src]").map { it.attr("src") }
-            .firstOrNull { it.isNotBlank() && !it.contains("google") && !it.contains("doubleclick") && !it.contains("propaganda") }
-            ?: doc.selectFirst("meta[name='twitter:player']")?.attr("content")
-        if (embedUrl != null) {
+        val embeds = doc.select("iframe[src]").map { it.attr("src") }
+            .filter { it.isNotBlank() && !it.contains("google") && !it.contains("doubleclick") && !it.contains("propaganda") }
+        val tw = doc.selectFirst("meta[name='twitter:player']")?.attr("content")
+        val order = buildList {
+            embeds.forEach { add(it) }
+            if (!tw.isNullOrBlank()) add(tw)
+        }
+        var tried = 0
+        for (embedUrl in order) {
+            if (found || tried++ >= 2) break
             val resolved = fixUrl(embedUrl)
-            android.util.Log.i(TAG, "embed try: $resolved")
+            android.util.Log.i(TAG, "embed try #$tried: $resolved")
             val html = try {
-                kotlinx.coroutines.withTimeout(8000) {
+                kotlinx.coroutines.withTimeout(10000) {
                     app.get(resolved, headers = defaultHeaders + ("Referer" to safeReferer())).text
                 }
             } catch (e: Exception) {
@@ -184,9 +195,10 @@ class ArabxCamProvider : MainAPI() {
                         .filterNot { it.endsWith(".jpg") || it.endsWith(".png") || it.endsWith(".webp") }
                         .forEach { emit(it) }
                 }
-                if (found) return true
             }
+            if (found) break
         }
+        if (found) return true
 
         // ═══ 3) HTML5 <video>/<source> في التفاصيل
         android.util.Log.i(TAG, "M3 video tags…")
@@ -266,10 +278,14 @@ class ArabxCamProvider : MainAPI() {
         val re = Regex("""eval\(function\s*\(p,a,c,k,e,d\)""")
         val m = re.find(js) ?: return null
 
-        // مشي الأقواس المتوازنة إلى قوس إغلاق eval — تجنّب regex DOTALL (StackOverflowError)
-        var depth = 0
+        // جسم المزوّر {…} وواجهته }( : نتحرك من بعد e,d) بموازنة الأقواس المتعرجة
+        // (خارج النصوص) حتى جسم-close '}' ثم نأخذ '(' الـ IIFE بعدها. هذا يصلح
+        // packer مع متن `while(c--)…` — العداد القديم كان يقف عند أول ')' في while(c--).
+        var brace = 0
         var inStr: Char? = null
-        var i = m.range.first + 4 // عند '(' بعد eval(
+        var i = m.range.last  // بعد e,d)
+        var argsOpen = -1
+        var close = -1
         while (i < js.length) {
             val c = js[i]
             if (inStr != null) {
@@ -279,17 +295,45 @@ class ArabxCamProvider : MainAPI() {
             }
             when (c) {
                 '\'', '"' -> inStr = c
-                '(' -> depth++
-                ')' -> { depth--; if (depth == 0) break }
+                '{' -> brace++
+                '}' -> {
+                    brace--
+                    if (brace == 0) {
+                        var k = i + 1
+                        while (k < js.length && js[k] in charArrayOf(' ', '\t', '\r', '\n')) k++
+                        if (k < js.length && js[k] == '(') {
+                            argsOpen = k
+                            // وازن الأقواس من '(' حتى ')' المطابق — يشمل النصوص المتداخلة
+                            var depth = 0
+                            var s2: Char? = null
+                            var kk = k
+                            while (kk < js.length) {
+                                val cc = js[kk]
+                                if (s2 != null) {
+                                    if (cc == '\\') { kk += 2; continue }
+                                    if (cc == s2) s2 = null
+                                    kk++; continue
+                                }
+                                when (cc) {
+                                    '\'', '"' -> s2 = cc
+                                    '(' -> depth++
+                                    ')' -> {
+                                        depth--
+                                        if (depth == 0) { close = kk; break }
+                                    }
+                                }
+                                kk++
+                            }
+                        }
+                        break
+                    }
+                }
             }
             i++
         }
-        if (depth != 0 || i >= js.length) return null
-        val close = i
+        if (argsOpen < 0 || close <= argsOpen) return null
 
-        val argsOpen = js.lastIndexOf("}(", close)
-        if (argsOpen <= m.range.first) return null
-        val args = splitTopLevel(js.substring(argsOpen + 2, close))
+        val args = splitTopLevel(js.substring(argsOpen + 1, close))
         if (args.size < 3) return null
 
         val radix = args.getOrNull(1)?.trim()?.toIntOrNull() ?: return null
