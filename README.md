@@ -1,7 +1,6 @@
 # Sources
 
-مجموعة مصادر عربية.
-
+Collection of sources.
 ## Installation
 
 1. Open the app
