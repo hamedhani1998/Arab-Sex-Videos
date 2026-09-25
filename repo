@@ -1,8 +1,7 @@
 {
-  "name": "Arab Sex Videos",
-  "description": "مشاهدة الأفلام الإباحية العربية",
+  "name": "عربي زرقاء",
+  "description": "مشاهدة الافلام والمسلسلات العربية تجربة خالية من الاعلانات",
+  "iconUrl": "https://raw.githubusercontent.com/hamedhani1998/Arab-Sex-Videos/refs/heads/main/icon.png",
   "manifestVersion": 1,
-  "pluginLists": [
-    "https://raw.githubusercontent.com/hamedhani1998/Arab-Sex-Videos/refs/heads/builds/plugins.json"
-  ]
+  "pluginLists": ["https://raw.githubusercontent.com/hamedhani1998/Arab-Sex-Videos/refs/heads/builds/plugins.json"]
 }
