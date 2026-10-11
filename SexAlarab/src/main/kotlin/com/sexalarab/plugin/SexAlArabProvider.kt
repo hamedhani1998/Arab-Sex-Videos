@@ -1,9 +1,13 @@
 package com.sexalarab.plugin
 
+import android.content.SharedPreferences
+
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import sharedplay.PluginSettings
+import sharedplay.emitChecked
 
 /**
  * سكس العرب — SexAlarab (مصدر واحد يخدم sexalarab.com + sexalarab.net)
@@ -17,7 +21,9 @@ import org.jsoup.nodes.Element
  *             ومشغل swf قديم (بنية function/0/https://sexalarab.com/get_file/...).
  *   البحث:    https://sexalarab.com/search/<استعلام>/
  */
-class SexAlArabProvider : MainAPI() {
+internal const val PREFS_NAME = "SexAlArab"
+
+class SexAlArabProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var mainUrl = "https://sexalarab.com"
     override var name = "سكس العرب"
     override val supportedTypes = setOf(TvType.NSFW)
@@ -105,15 +111,20 @@ class SexAlArabProvider : MainAPI() {
         var found = false
 
         suspend fun emit(url: String, quality: Int = Qualities.Unknown.value) {
-            val type = if (url.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-            callback.invoke(
-                newExtractorLink("sexalarab", serverHost(url), url, type) {
-                    this.quality = quality
-                    this.referer = mainUrl
-                }
-            )
-            found = true
+            // فحص + وسم بخياري الإضافة: يُسقط الرابط الميت (منعاً لخطأ 2004)
+            // ويُظهر الصيغة (MP4/M3U8/DASH…) في اسم السيرفر.
+            if (emitChecked(
+                    url = url,
+                    name = serverHost(url),
+                    referer = mainUrl,
+                    quality = quality,
+                    callback = callback,
+                    probe = prefs?.getBoolean(PluginSettings.probeKey(PREFS_NAME), true) ?: true,
+                    tag = prefs?.getBoolean(PluginSettings.tagKey(PREFS_NAME), true) ?: true
+                )
+            ) found = true
         }
+
 
         val raw = app.get(data, headers = defaultHeaders).text
 

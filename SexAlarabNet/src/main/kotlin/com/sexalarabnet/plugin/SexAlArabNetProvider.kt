@@ -1,8 +1,12 @@
 package com.sexalarabnet.plugin
 
+import android.content.SharedPreferences
+
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
+import sharedplay.PluginSettings
+import sharedplay.emitChecked
 
 /**
  * سكس العرب نت — sexalarab.net
@@ -15,7 +19,9 @@ import org.jsoup.nodes.Element
  *   - البحث:        لا يوفّر الموقع بحثاً فعلياً.
  * المشغل:          HLS بعيدة 360/480/720 عبر api.sexalarab.net/hls/<id>/master.m3u8
  */
-class SexAlArabNetProvider : MainAPI() {
+internal const val PREFS_NAME = "SexAlArabNet"
+
+class SexAlArabNetProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var mainUrl = "https://sexalarab.net"
     override var name = "سكس العرب نت"
     override val supportedTypes = setOf(TvType.NSFW)
@@ -109,15 +115,20 @@ class SexAlArabNetProvider : MainAPI() {
         var found = false
 
         suspend fun emit(url: String, quality: Int = Qualities.Unknown.value) {
-            val type = if (url.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-            callback.invoke(
-                newExtractorLink("sexalarabnet", serverHost(url), url, type) {
-                    this.quality = quality
-                    this.referer = mainUrl
-                }
-            )
-            found = true
+            // فحص + وسم بخياري الإضافة: يُسقط الرابط الميت (منعاً لخطأ 2004)
+            // ويُظهر الصيغة (MP4/M3U8/DASH…) في اسم السيرفر.
+            if (emitChecked(
+                    url = url,
+                    name = serverHost(url),
+                    referer = mainUrl,
+                    quality = quality,
+                    callback = callback,
+                    probe = prefs?.getBoolean(PluginSettings.probeKey(PREFS_NAME), true) ?: true,
+                    tag = prefs?.getBoolean(PluginSettings.tagKey(PREFS_NAME), true) ?: true
+                )
+            ) found = true
         }
+
 
         val document = app.get(data, headers = defaultHeaders).document
 

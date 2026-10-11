@@ -1,10 +1,16 @@
 package com.arabsex1.plugin
 
+import android.content.SharedPreferences
+
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import sharedplay.LocalPlay
+import sharedplay.Family
+import sharedplay.PluginSettings
 
-class ArabSex1Provider : MainAPI() {
+internal const val PREFS_NAME = "ArabSex1"
+
+class ArabSex1Provider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var name = "سكس عربي 1"
     override var mainUrl = "https://arabsex1.com"
     override var lang = "ar"
@@ -72,60 +78,21 @@ class ArabSex1Provider : MainAPI() {
         data: String, isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit
     ): Boolean {
-        try {
+        return try {
             val doc = app.get(data, referer = mainUrl).document
-            val allScript = doc.select("script").joinToString("\n") { it.data() }
-
-            if (allScript.contains("flashvars")) {
-                val entries = listOf("video_url" to "240p", "video_alt_url" to "360p", "video_alt_url2" to "480p")
-                for ((urlKey, quality) in entries) {
-                    val url = Regex("""$urlKey\s*[:=]\s*['"]([^'"]+)['"]""").find(allScript)?.groupValues?.get(1)
-                    if (!url.isNullOrBlank()) {
-                        callback(newExtractorLink(name, name, decodeUrl(url), ExtractorLinkType.VIDEO) {
-                            this.referer = mainUrl; this.quality = getQualityFromName(quality)
-                        })
-                    }
-                }
-                return true
-            }
-
-            val videoUrlMatch = Regex("""video_url\s*:\s*['"]([^'"]+)['"]""").find(allScript)
-            if (videoUrlMatch != null) {
-                callback(newExtractorLink(name, name, decodeUrl(videoUrlMatch.groupValues[1]), ExtractorLinkType.VIDEO) {
-                    this.referer = mainUrl; this.quality = getQualityFromName("360p")
-                })
-                return true
-            }
-
-            doc.select("video source").forEach { source ->
-                val url = source.attr("src")
-                if (url.isNotBlank() && url.contains(".mp4")) {
-                    callback(newExtractorLink(name, name, url, ExtractorLinkType.VIDEO) {
-                        this.referer = mainUrl; this.quality = getQualityFromName("360p")
-                    })
-                    return true
-                }
-            }
-
-            val iframe = doc.selectFirst("iframe[src]")
-            if (iframe != null) {
-                if (LocalPlay.resolve(iframe.attr("src"), mainUrl, subtitleCallback, callback)) return true
-            }
-            return false
-        } catch (e: Exception) { return false }
-    }
-
-    private fun decodeUrl(url: String): String {
-        val decoded = when {
-            url.startsWith("function/0/") -> try {
-                android.util.Base64.decode(url.removePrefix("function/0/"), android.util.Base64.DEFAULT).toString(Charsets.UTF_8)
-            } catch (_: Exception) { url.removePrefix("function/0/") }
-            else -> url
-        }
-        return when {
-            decoded.startsWith("//") -> "https:$decoded"
-            decoded.startsWith("https/") -> "https://${decoded.removePrefix("https/")}"
-            else -> decoded
+            Family.resolve(
+                doc = doc,
+                referer = data,
+                origin = mainUrl,
+                subtitleCallback = subtitleCallback,
+                callback = callback,
+                options = Family.Options(
+                    probe = prefs?.getBoolean(PluginSettings.probeKey(PREFS_NAME), true) ?: true,
+                    formatTag = prefs?.getBoolean(PluginSettings.tagKey(PREFS_NAME), true) ?: true
+                )
+            ) > 0
+        } catch (e: Exception) {
+            false
         }
     }
 }

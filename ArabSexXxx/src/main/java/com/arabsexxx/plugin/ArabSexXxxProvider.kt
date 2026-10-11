@@ -1,10 +1,16 @@
 package com.arabsexxx.plugin
 
+import android.content.SharedPreferences
+
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import sharedplay.LocalPlay
+import sharedplay.Family
+import sharedplay.PluginSettings
 
-class ArabSexXxxProvider : MainAPI() {
+internal const val PREFS_NAME = "ArabSexXxx"
+
+class ArabSexXxxProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var name = "سكس عربي xxx"
     override var mainUrl = "https://www.arabsex.xxx"
     override var lang = "ar"
@@ -72,67 +78,21 @@ class ArabSexXxxProvider : MainAPI() {
         data: String, isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit
     ): Boolean {
-        try {
+        return try {
             val doc = app.get(data, referer = mainUrl).document
-            val html = doc.html()
-
-            // Method 1: contentUrl in JSON-LD schema - MOST RELIABLE
-            val contentUrl = Regex(""""contentUrl"\s*:\s*"([^"]+\.mp4[^"]*)""").find(html)?.groupValues?.get(1)
-            if (!contentUrl.isNullOrBlank()) {
-                callback(newExtractorLink(name, name, contentUrl, ExtractorLinkType.VIDEO) {
-                    this.referer = mainUrl; this.quality = getQualityFromName("720p")
-                })
-                return true
-            }
-
-            // Method 2: video_url in kt_player script
-            val videoUrl = Regex("""video_url\s*:\s*['"]([^'"]+)['"]""").find(html)?.groupValues?.get(1)
-            if (!videoUrl.isNullOrBlank()) {
-                callback(newExtractorLink(name, name, decodeUrl(videoUrl), ExtractorLinkType.VIDEO) {
-                    this.referer = mainUrl; this.quality = getQualityFromName("720p")
-                })
-                return true
-            }
-
-            // Method 3: video source tags
-            doc.select("video source").forEach { source ->
-                val url = source.attr("src")
-                if (url.isNotBlank() && url.contains(".mp4")) {
-                    callback(newExtractorLink(name, name, url, ExtractorLinkType.VIDEO) {
-                        this.referer = mainUrl; this.quality = getQualityFromName("360p")
-                    })
-                    return true
-                }
-            }
-
-            // Method 4: iframe embed — يُحلّ محلياً (لا مشغل خارجي). الصفحة قد لا
-            // تضع الرابط في السكربتات صراحةً، فيبقى الإطار هو الطريق الأخير.
-            val iframe = doc.selectFirst("iframe[src], iframe[data-src]")
-            if (iframe != null) {
-                val iframeUrl = iframe.attr("src").ifBlank { iframe.attr("data-src") }
-                if (iframeUrl.isNotBlank()) {
-                    if (LocalPlay.resolve(iframeUrl, data, subtitleCallback, callback)) return true
-                }
-            }
-
-            return false
-        } catch (e: Exception) { return false }
-    }
-
-    private fun decodeUrl(url: String): String {
-        val decoded = when {
-            url.startsWith("function/0/") -> {
-                try {
-                    val base64 = url.removePrefix("function/0/")
-                    android.util.Base64.decode(base64, android.util.Base64.DEFAULT).toString(Charsets.UTF_8)
-                } catch (_: Exception) { url.removePrefix("function/0/") }
-            }
-            else -> url
-        }
-        return when {
-            decoded.startsWith("//") -> "https:$decoded"
-            decoded.startsWith("https/") -> "https://${decoded.removePrefix("https/")}"
-            else -> decoded
+            Family.resolve(
+                doc = doc,
+                referer = data,
+                origin = mainUrl,
+                subtitleCallback = subtitleCallback,
+                callback = callback,
+                options = Family.Options(
+                    probe = prefs?.getBoolean(PluginSettings.probeKey(PREFS_NAME), true) ?: true,
+                    formatTag = prefs?.getBoolean(PluginSettings.tagKey(PREFS_NAME), true) ?: true
+                )
+            ) > 0
+        } catch (e: Exception) {
+            false
         }
     }
 }

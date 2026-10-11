@@ -2,7 +2,7 @@ android {
     namespace = "com.xnxx3rab.plugin"
 }
 
-version = 1
+version = 2
 
 cloudstream {
     description = "إضافة عرب xnxx - أفلام إباحية عربية"

@@ -1,11 +1,15 @@
 package com.arabx.plugin
 
+import android.content.SharedPreferences
+
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Element
+import sharedplay.PluginSettings
+import sharedplay.emitChecked
 
 /**
  * عرب اكس — arabx.cam
@@ -19,7 +23,9 @@ import org.jsoup.nodes.Element
  *                * أو روابط mp4/m3u8 مباشرة في سكربتات الصفحة
  * كلها تحل محلياً — لا حاجة لمشغل خارجي/إضافة extractor.
  */
-class ArabxCamProvider : MainAPI() {
+internal const val PREFS_NAME = "ArabxCam"
+
+class ArabxCamProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     private val TAG = "arabx"
     override var mainUrl = "https://www.arabx.cam"
     override var name = "عرب اكس"
@@ -120,16 +126,20 @@ class ArabxCamProvider : MainAPI() {
         var found = false
 
         suspend fun emit(url: String, quality: Int = Qualities.Unknown.value) {
-            // تحديد النوع صراحة — m3u8 أم mp4 (لا استدلال بالـ path فينكسر مع ?token)
-            val type = if (url.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-            callback.invoke(
-                newExtractorLink("arabx", serverHost(url), url, type) {
-                    this.quality = quality
-                    this.referer = safeReferer()
-                }
-            )
-            found = true
+            // فحص + وسم بخياري الإضافة: يُسقط الرابط الميت (منعاً لخطأ 2004)
+            // ويُظهر الصيغة (MP4/M3U8/DASH…) في اسم السيرفر.
+            if (emitChecked(
+                    url = url,
+                    name = serverHost(url),
+                    referer = mainUrl,
+                    quality = quality,
+                    callback = callback,
+                    probe = prefs?.getBoolean(PluginSettings.probeKey(PREFS_NAME), true) ?: true,
+                    tag = prefs?.getBoolean(PluginSettings.tagKey(PREFS_NAME), true) ?: true
+                )
+            ) found = true
         }
+
 
         val doc = try {
             app.get(data, headers = defaultHeaders).document

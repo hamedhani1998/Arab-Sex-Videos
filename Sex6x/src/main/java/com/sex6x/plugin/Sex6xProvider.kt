@@ -1,10 +1,16 @@
 package com.sex6x.plugin
 
+import android.content.SharedPreferences
+
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import sharedplay.LocalPlay
+import sharedplay.Family
+import sharedplay.PluginSettings
 
-class Sex6xProvider : MainAPI() {
+internal const val PREFS_NAME = "Sex6x"
+
+class Sex6xProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var name = "سكس سكس اكس"
     override var mainUrl = "https://www.sex6x.com"
     override var lang = "ar"
@@ -87,77 +93,21 @@ class Sex6xProvider : MainAPI() {
         data: String, isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit
     ): Boolean {
-        try {
+        return try {
             val doc = app.get(data, referer = mainUrl).document
-            var found = false
-
-            // Method 1: video source tags - PRIMARY METHOD
-            doc.select("video source").forEach { source ->
-                val url = source.attr("src")
-                val quality = source.attr("title")
-                if (url.isNotBlank() && url.contains(".mp4")) {
-                    callback(newExtractorLink(
-                        source = name,
-                        name = name,
-                        url = url,
-                        type = ExtractorLinkType.VIDEO
-                    ) {
-                        this.referer = mainUrl
-                        this.quality = getQualityFromName(quality.ifBlank { "360p" })
-                    })
-                    found = true
-                }
-            }
-            if (found) return true
-
-            // Method 2: flashvars fallback
-            val allScript = doc.select("script").joinToString("\n") { it.data() }
-            if (allScript.contains("flashvars")) {
-                val entries = listOf(
-                    "video_url" to "video_url_text",
-                    "video_alt_url" to "video_alt_url_text",
-                    "video_alt_url2" to "video_alt_url2_text"
+            Family.resolve(
+                doc = doc,
+                referer = data,
+                origin = mainUrl,
+                subtitleCallback = subtitleCallback,
+                callback = callback,
+                options = Family.Options(
+                    probe = prefs?.getBoolean(PluginSettings.probeKey(PREFS_NAME), true) ?: true,
+                    formatTag = prefs?.getBoolean(PluginSettings.tagKey(PREFS_NAME), true) ?: true
                 )
-                for ((urlKey, textKey) in entries) {
-                    val url = Regex("""$urlKey\s*[:=]\s*['"]([^'"]+)['"]""").find(allScript)?.groupValues?.get(1)
-                    val quality = Regex("""$textKey\s*[:=]\s*['"]([^'"]+)['"]""").find(allScript)?.groupValues?.get(1)
-                        ?: when(urlKey) { "video_url" -> "240p"; "video_alt_url" -> "360p"; else -> "480p" }
-                    if (!url.isNullOrBlank()) {
-                        callback(newExtractorLink(name, name, url, ExtractorLinkType.VIDEO) {
-                            this.referer = mainUrl
-                            this.quality = getQualityFromName(quality)
-                        })
-                        found = true
-                    }
-                }
-            }
-            if (found) return true
-
-            // Method 3: iframe embed — يُحلّ محلياً
-            val iframe = doc.selectFirst("iframe[src]")
-            if (iframe != null) {
-                val iframeUrl = iframe.attr("src")
-                if (iframeUrl.isNotBlank()) {
-                    if (LocalPlay.resolve(iframeUrl, mainUrl, subtitleCallback, callback)) return true
-                }
-            }
-
-            return false
-        } catch (e: Exception) { return false }
-    }
-
-    private fun clean(url: String): String {
-        val decoded = when {
-            url.startsWith("function/0/") -> {
-                try { android.util.Base64.decode(url.removePrefix("function/0/"), android.util.Base64.DEFAULT).toString(Charsets.UTF_8) }
-                catch (_: Exception) { url.removePrefix("function/0/") }
-            }
-            else -> url
-        }
-        return when {
-            decoded.startsWith("//") -> "https:$decoded"
-            decoded.startsWith("https/") -> "https://${decoded.removePrefix("https/")}"
-            else -> decoded
+            ) > 0
+        } catch (e: Exception) {
+            false
         }
     }
 }

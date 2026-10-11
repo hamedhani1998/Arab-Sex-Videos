@@ -1,8 +1,12 @@
 package com.arabxn.plugin
 
+import android.content.SharedPreferences
+
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
+import sharedplay.PluginSettings
+import sharedplay.emitChecked
 
 /**
  * arabxn.com — عرب xn
@@ -10,7 +14,9 @@ import org.jsoup.nodes.Element
  * القائمة:  https://arabxn.com/   (روابط /watch-<id>/<slug>/)
  * المشغل:   mp4 مباشرة في التفاصيل (arabxn.xyz/done/...mp4)
  */
-class ArabXNProvider : MainAPI() {
+internal const val PREFS_NAME = "ArabXN"
+
+class ArabXNProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var mainUrl = "https://arabxn.com"
     override var name = "عرب xn"
     override val supportedTypes = setOf(TvType.NSFW)
@@ -96,15 +102,20 @@ override suspend fun loadLinks(
         val document = app.get(data, headers = defaultHeaders).document
 
         suspend fun emit(url: String, quality: Int = Qualities.Unknown.value) {
-            val type = if (url.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-            callback.invoke(
-                newExtractorLink("arabxn", serverHost(url), url, type) {
-                    this.quality = quality
-                    this.referer = mainUrl
-                }
-            )
-            found = true
+            // فحص + وسم بخياري الإضافة: يُسقط الرابط الميت (منعاً لخطأ 2004)
+            // ويُظهر الصيغة (MP4/M3U8/DASH…) في اسم السيرفر.
+            if (emitChecked(
+                    url = url,
+                    name = serverHost(url),
+                    referer = mainUrl,
+                    quality = quality,
+                    callback = callback,
+                    probe = prefs?.getBoolean(PluginSettings.probeKey(PREFS_NAME), true) ?: true,
+                    tag = prefs?.getBoolean(PluginSettings.tagKey(PREFS_NAME), true) ?: true
+                )
+            ) found = true
         }
+
 
         // مصدر HTML5: <source size="720|360|240"> — الجودة تقرأ من size= فيظهر "720p" بجوار الرابط
         for (el in document.select("video source[src], video[src], source[src]")) {

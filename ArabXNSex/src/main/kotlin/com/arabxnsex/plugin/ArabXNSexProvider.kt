@@ -1,8 +1,12 @@
 package com.arabxnsex.plugin
 
+import android.content.SharedPreferences
+
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
+import sharedplay.PluginSettings
+import sharedplay.emitChecked
 
 /**
  * arabxn.sex — سكس مترجم عربي
@@ -13,7 +17,9 @@ import org.jsoup.nodes.Element
  * المشغل:   flashvars video_url: 'function/0/get_file/...mp4/' (+ _text للجودة).
  *           روابط get_file تُطلق بدون بادئة function/0 (بعيدة 302 إلى cdn عند عملها).
  */
-class ArabXNSexProvider : MainAPI() {
+internal const val PREFS_NAME = "ArabXNSex"
+
+class ArabXNSexProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var mainUrl = "https://arabxn.sex"
     override var name = "arabxn.sex"
     override val supportedTypes = setOf(TvType.NSFW)
@@ -162,24 +168,26 @@ override suspend fun loadLinks(
                 fixUrl(getFile) // احتياط: لو فشل HEAD نرسل get_file (قد ينجح بالصدفة لكن غالباً 410)
             }
             if (!cdn.contains(".mp4") && !cdn.contains(".m3u8")) continue
-            callback.invoke(
-                newExtractorLink(
-                    "arabxnsex",
-                    buildString {
-                        append("arabxn")
-                        when {
-                            q != Qualities.Unknown.value -> append(" • ${q}p")
-                            hasHdBadge -> append(" • HD")
-                        }
-                    },
-                    cdn,
-                    ExtractorLinkType.VIDEO
-                ) {
-                    this.quality = q
-                    this.referer = mainUrl
+            val label = buildString {
+                append("arabxn")
+                when {
+                    q != Qualities.Unknown.value -> append(" • ${q}p")
+                    hasHdBadge -> append(" • HD")
                 }
-            )
-            found = true
+            }
+            // فحص + وسم بخياري الإضافة: الرابط الميت لا يصل المشغّل (منعاً لخطأ
+            // 2004)، والصيغة تُكتب في الاسم فيُعرف MP4 من M3U8 قبل الضغط.
+            // (رابط احتياطي هنا غالباً 410، والفحص هو ما يمنعه من الوصول.)
+            if (emitChecked(
+                    url = cdn,
+                    name = label,
+                    referer = mainUrl,
+                    quality = q,
+                    callback = callback,
+                    probe = prefs?.getBoolean(PluginSettings.probeKey(PREFS_NAME), true) ?: true,
+                    tag = prefs?.getBoolean(PluginSettings.tagKey(PREFS_NAME), true) ?: true
+                )
+            ) found = true
         }
 
         return found

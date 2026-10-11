@@ -1,10 +1,16 @@
 package com.sexarab69.plugin
 
+import android.content.SharedPreferences
+
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import sharedplay.LocalPlay
+import sharedplay.Family
+import sharedplay.PluginSettings
 
-class SexArab69Provider : MainAPI() {
+internal const val PREFS_NAME = "SexArab69"
+
+class SexArab69Provider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var name = "سكس عرب 69"
     override var mainUrl = "https://sexarab69.com"
     override var lang = "ar"
@@ -87,51 +93,21 @@ class SexArab69Provider : MainAPI() {
         data: String, isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit
     ): Boolean {
-        try {
+        return try {
             val doc = app.get(data, referer = mainUrl).document
-
-            doc.select("meta[itemprop=contentURL]").forEach { meta ->
-                val url = meta.attr("content")
-                if (url.isNotBlank() && url.contains(".mp4")) {
-                    callback(newExtractorLink(name, name, url, ExtractorLinkType.VIDEO) {
-                        this.referer = mainUrl
-                        this.quality = getQualityFromName("360p")
-                    })
-                    return true
-                }
-            }
-
-            doc.select("video source").forEach { source ->
-                val url = source.attr("src")
-                val quality = source.attr("title")
-                if (url.isNotBlank() && url.contains(".mp4")) {
-                    callback(newExtractorLink(name, name, url, ExtractorLinkType.VIDEO) {
-                        this.referer = mainUrl
-                        this.quality = getQualityFromName(quality.ifBlank { "360p" })
-                    })
-                    return true
-                }
-            }
-
-            val iframe = doc.selectFirst("iframe[src*=clean-tube-player], iframe[data-src*=clean-tube-player]")
-            if (iframe != null) {
-                val iframeUrl = iframe.attr("src").ifBlank { iframe.attr("data-src") }
-                if (iframeUrl.isNotBlank()) {
-                    if (LocalPlay.resolve(iframeUrl, mainUrl, subtitleCallback, callback)) return true
-                }
-            }
-
-            val allScript = doc.select("script").joinToString("\n") { it.data() }
-            val directMp4 = Regex("""(https?://[^"'\s]+\.mp4[^"'\s]*)""").find(allScript)?.groupValues?.get(1)
-            if (directMp4 != null) {
-                callback(newExtractorLink(name, name, directMp4, ExtractorLinkType.VIDEO) {
-                    this.referer = mainUrl
-                    this.quality = getQualityFromName("360p")
-                })
-                return true
-            }
-
-            return false
-        } catch (e: Exception) { return false }
+            Family.resolve(
+                doc = doc,
+                referer = data,
+                origin = mainUrl,
+                subtitleCallback = subtitleCallback,
+                callback = callback,
+                options = Family.Options(
+                    probe = prefs?.getBoolean(PluginSettings.probeKey(PREFS_NAME), true) ?: true,
+                    formatTag = prefs?.getBoolean(PluginSettings.tagKey(PREFS_NAME), true) ?: true
+                )
+            ) > 0
+        } catch (e: Exception) {
+            false
+        }
     }
 }
