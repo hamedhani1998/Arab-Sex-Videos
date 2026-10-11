@@ -63,6 +63,23 @@ jobs:
             "XHorno": "xhorno",
             "ArabXN": "عرب xn",
             "ArabXNSex": "arabxn.sex",
+            # الإضافات المنقولة من مستودع sources-arab
+            "Aflamk1": "أفلامك1",
+            "ArabHubX": "ArabHub X",
+            "ArabNok": "عرب نوك",
+            "ArabSex1": "سكس عربي 1",
+            "ArabSexXxx": "سكس عربي xxx",
+            "ArbNaar": "عرب نار",
+            "Arbada": "العربدة",
+            "FagerNeek": "فاجر نيك",
+            "FreeSexArab": "سكس عربي مجاني",
+            "Sex6x": "سكس سكس اكس",
+            "SexAllArab": "سكس كل العرب",
+            "SexArab69": "سكس عرب 69",
+            "SexArabFun": "سكس عربي فان",
+            "Sexalarab11": "سكس العرب 11",
+            "XNXX3rab": "عرب xnxx",
+            "Zebawy": "زباوي",
           }
           ws = os.environ["WS"]
           p = os.path.join(ws, "builds", "plugins.json")

@@ -60,6 +60,13 @@ subprojects {
     android {
         namespace = "com.hamedhani1998"
 
+        // كود مشترك يُبنى داخل كل إضافة (لا اعتماد بيني): محلّل التشغيل المحلي
+        // الذي حلّ محل `loadExtractor`/المشغل الخارجي. مجلد بلا build.gradle.kts
+        // فلا يعامله settings.gradle.kts مشروعاً مستقلاً — نفس أسلوب narto-shared.
+        sourceSets.getByName("main").java.srcDir(
+            rootProject.file("shared-play/src/main/java")
+        )
+
         defaultConfig {
             minSdk = 21
             compileSdkVersion(36)
