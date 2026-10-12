@@ -2,7 +2,7 @@ android {
     namespace = "com.arabsexxx.plugin"
 }
 
-version = 3
+version = 4
 
 cloudstream {
     description = "إضافة سكس عربي xxx - أفلام إباحية عربية"

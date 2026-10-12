@@ -2,7 +2,7 @@ android {
     namespace = "com.zebawy.plugin"
 }
 
-version = 3
+version = 4
 
 cloudstream {
     description = "إضافة زباوي - أفلام إباحية عربية"

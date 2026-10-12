@@ -4,8 +4,14 @@ import android.content.SharedPreferences
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.nodes.Element
 import sharedplay.PluginSettings
+import sharedplay.Probe
 import sharedplay.emitChecked
 
 /**
@@ -15,6 +21,12 @@ import sharedplay.emitChecked
  * المشغل:   video.xhorno.com/xhorno/...mp4  — mp4 مباشرة في التفاصيل
  */
 internal const val PREFS_NAME = "XHorno"
+
+/**
+ * حدّ زمني لكل صفّ في الرئيسية. ستّ ثوانٍ: أطول من أبطأ قسم مقيس بأريحية،
+ * وأقصر بكثير من مهلة الشبكة الافتراضية، فلا يعلّق صفٌّ واحد الصفحة كلها.
+ */
+private const val SECTION_TIMEOUT_MS = 6_000L
 
 class XHornoProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
     override var mainUrl = "https://xhorno.com"
@@ -40,25 +52,48 @@ class XHornoProvider(private val prefs: SharedPreferences? = null) : MainAPI() {
 
     private suspend fun fetchItems(url: String): List<SearchResponse> {
         return try {
-            app.get(url, headers = defaultHeaders).document
-                .select("article.video-card, article, .post, .item, .video-item, .c-video")
-                .mapNotNull { it.toSearchResponse() }
-                .distinctBy { it.url }
+            // حدّ زمني لكل صفّ: قسم واحد بطيء أو معلّق كان يوقف الرئيسية كلها
+            // لأن الواجهة تنتظر **كل** الصفوف قبل أول رسم. فالمعلّق يُقطع
+            // ويعود فارغاً بدل أن يُعلّق الصفحة إلى الأبد.
+            withTimeoutOrNull(SECTION_TIMEOUT_MS) {
+                app.get(url, headers = defaultHeaders).document
+                    .select("article.video-card, article, .post, .item, .video-item, .c-video")
+                    .mapNotNull { it.toSearchResponse() }
+                    .distinctBy { it.url }
+            } ?: emptyList()
         } catch (_: Exception) {
             emptyList()
         }
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val lists = if (page <= 1) buildList {
-            add(HomePageList("أحدث مقاطع xhorno", fetchItems(mainUrl)))
-            for ((label, path) in mainSections) {
-                add(HomePageList(label, fetchItems("$mainUrl$path")))
+        // ## لماذا بالتوازي لا بالتتابع
+        // كان كل صفّ يُجلب في دورة مستقلة (7 أقسام = 7 رحلات متتالية)، فزمن
+        // الرئيسية = مجموع أزمنتها، مع أنها لا تشترك في شيء. والواجهة لا ترسم
+        // شيئاً حتى تصل كلها، فيظهر «يدور ولا يُظهر شيئاً» على شبكة بطيئة.
+        // فتُطلق كلها معاً، وترتيب الصفوف محفوظ لأن `awaitAll` تحفظ ترتيب
+        // الإدخال.
+        return if (page <= 1) {
+            val specs = buildList {
+                add("أحدث مقاطع xhorno" to mainUrl)
+                for ((label, path) in mainSections) add(label to "$mainUrl$path")
             }
-        } else buildList {
-            add(HomePageList("أحدث مقاطع xhorno — صفحة $page", fetchItems("$mainUrl/?page=$page")))
+            val rows = coroutineScope {
+                specs.map { (label, url) ->
+                    async(Dispatchers.IO) { HomePageList(label, fetchItems(url)) }
+                }.awaitAll()
+            }
+            newHomePageResponse(rows)
+        } else {
+            newHomePageResponse(
+                listOf(
+                    HomePageList(
+                        "أحدث مقاطع xhorno — صفحة $page",
+                        fetchItems("$mainUrl/?page=$page")
+                    )
+                )
+            )
         }
-        return newHomePageResponse(lists)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -147,16 +182,35 @@ override suspend fun loadLinks(
         }
 
         if (!found) {
-            for (iframe in document.select("iframe[src]")) {
-                val src = iframe.attr("src").ifBlank { continue }
-                val html = try {
-                    app.get(fixUrl(src), headers = defaultHeaders + ("Referer" to data)).text
-                } catch (_: Exception) { continue }
-                val candidates = Regex("""https?://[^\s"']+\.(?:mp4|m3u8)[^\s"']*""", RegexOption.IGNORE_CASE)
-                    .findAll(html).map { it.value }.distinct()
-                    .filterNot { it.endsWith(".jpg") || it.endsWith(".png") || it.endsWith(".webp") }
-                for (c in candidates) emit(c)
+            // ## الإطارات بالتوازي — لا بالتتابع
+            // كانت كل إطار يُجلب ثم يُفحص كل مرشّح فيه **على حدة**، فالزمن
+            // مجموع لا أقصى. وقاعدة [Probe] هي أن الفحص الواحد يكلّف حتى
+            // مهلة كاملة إن علّق المضيف، فيصير الانتظار N × مهلة — وهي بالحرف
+            // «يجلس يدور ولا يُظهر شيئاً» المُبلَّغ عنه. فتُجلب الإطارات معاً،
+            // ثم يُفحص المرشّحون في دفعة متوازية واحدة، ثم يُصدَر الحيّ وحده
+            // بترتيب الصفحة (فلا يتبدّل ترتيب السيرفرات أمام المستخدم).
+            val groups = coroutineScope {
+                document.select("iframe[src]").map { iframe ->
+                    async(Dispatchers.IO) {
+                        val src = iframe.attr("src")
+                        if (src.isBlank()) return@async emptyList()
+                        val html = try {
+                            app.get(fixUrl(src), headers = defaultHeaders + ("Referer" to data)).text
+                        } catch (_: Exception) {
+                            return@async emptyList()
+                        }
+                        Regex("""https?://[^\s"']+\.(?:mp4|m3u8)[^\s"']*""", RegexOption.IGNORE_CASE)
+                            .findAll(html).map { it.value }
+                            .filterNot {
+                                it.endsWith(".jpg") || it.endsWith(".png") || it.endsWith(".webp")
+                            }
+                            .toList()
+                    }
+                }.awaitAll()
             }
+            val candidates = groups.flatten().distinct()
+            val live = Probe.aliveSubset(candidates, mainUrl)
+            for (c in candidates) if (c in live) emit(c)
         }
 
         return found
@@ -170,8 +224,15 @@ override suspend fun loadLinks(
         val poster = this.selectFirst("img.video-card-poster")?.attr("src")
             ?: this.selectFirst("img")?.attr("src")
             ?: this.selectFirst("img")?.attr("data-src")
-        return newMovieSearchResponse(title, href, TvType.NSFW) {
-            this.posterUrl = poster
+        // ## `fixUrl` هنا ليست تحسيناً — بحذفها لا يُفتح شيء
+        // مقيس 2026-10-12 على xhorno: **كل** روابط البطاقات نسبية
+        // (`/video/video-RBXW3tKrnV/…`، 30 من 30، ولا رابط مطلق واحد).
+        // والمشغّل لا يحلّ النسبي: صفحة التفاصيل لا تُفتح، فيبقى العنوان
+        // «يدور ولا يُظهر شيئاً» — وهذا العَرَض المُبلَّغ عنه بالحرف. وليست
+        // الشاشة فارغة لأن الشبكة بطيئة، بل لأن الطلب يذهب إلى مسار لا وجود
+        // له فيسقط في مهلة، والرئيسية صحيحة تماماً.
+        return newMovieSearchResponse(title, fixUrl(href), TvType.NSFW) {
+            this.posterUrl = poster?.let { if (it.startsWith("http")) it else fixUrl(it) }
         }
     }
 

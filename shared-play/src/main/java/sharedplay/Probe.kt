@@ -1,6 +1,12 @@
 package sharedplay
 
 import com.lagradost.cloudstream3.app
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeout
 
 /**
@@ -46,6 +52,15 @@ object Probe {
     /**
      * الحكم مع سببه — يُستعمل في السجل حين نحتاج معرفة **لماذا** رُفض رابط.
      * الفصل مهم: «404» خبر عن الموقع، و«timeout» خبر عن الشبكة.
+     *
+     * ## المهلة 8 ثوان لا 12
+     * المهلة هنا سقفٌ يُدفَع لكل مرشّح ميت، لا زمن انتظار فعلي لرابط حيّ.
+     * ومقيس على هذه العائلة أن المضيف السليم يردّ أول بايت في 1.5–3 ثوان
+     * (`arabxn.sex` عبر `cdn.arabxn.sex` كان 2.4–3.1 ث في عشر قياسات متتالية)
+     * وأن المضيف المعلّق يستهلك السقف كاملاً. فسقف 12 ثانية كان يضاعف انتظار
+     * الميت بلا فائدة: ما يرد في 12 سيرد في 8، وما لا يرد فيها لا يرد.
+     * وخفضُه إلى 8 يقلّص أسوأ حالة في الدفعة المتوازية بنحو الثلث — وهو
+     * الذي يُظهر للمستخدم خطأ 2002 (انتهت مهلة الاتصال).
      */
     suspend fun verdict(url: String, referer: String? = null): Verdict {
         if (!url.startsWith("http")) return Verdict.DEAD
@@ -55,7 +70,7 @@ object Probe {
         headers["Accept"] = "*/*"
         if (!referer.isNullOrBlank()) headers["Referer"] = referer
         return try {
-            val resp = withTimeout(12_000) {
+            val resp = withTimeout(8_000) {
                 app.get(url, headers = headers, allowRedirects = true)
             }
             val code = resp.code
@@ -126,6 +141,47 @@ object Probe {
     suspend fun firstAlive(candidates: List<String>, referer: String? = null): String? {
         for (c in candidates) if (alive(c, referer)) return c
         return null
+    }
+
+    /**
+     * يفحص قائمة مرشّحين **بالتوازي** ويعيد الحيّ منها كمجموعة.
+     *
+     * ## لماذا التوازي هنا ضرورة لا تحسين
+     * الفحص الواحد يكلّف ما بين عشرات الميلي ثانية (ردّ سريع) إلى مهلة
+     * كاملة 12 ثانية (مضيف معلّق). والتنفيذ التسلسلي كان يجمع هذه الأزمنة:
+     * فصفحة فيها 21 مرشّحاً `get_file` × نسختين (بالتوكن وعارياً) = **42
+     * فحصاً متتالياً**. مقيس على مضيف يردّ في نحو 1.7 ثانية (arabxn.sex)
+     * يكون الانتظار قبل ظهور أي رابط ≈ **70 ثانية**، وعلى مضيف معلّق أسوأ.
+     * وهذا بالحرف «بطء الاستجابة للتشغيل» المُبلَّغ عنه.
+     *
+     * ## حدّ التزامن ليس تفصيلاً
+     * إطلاق 42 طلباً معاً على مضيف واحد يُشبه هجوماً فيفرض حدّاً ويبدأ
+     * يردّ 403 — فينقلب التحسين إلى عطل. فالتزامن محدود بـ[parallelism]
+     * (ستة افتراضاً: كافٍ لإخفاء زمن الشبكة، وأقلّ بكثير من عتبة أي مضيف
+     * فُحص في هذا المستودع).
+     *
+     * والنتيجة **مجموعة** لا قائمة: الترتيب يبقى للمستدعي فيُصدر بترتيب
+     * الصفحة نفسه، فلا يتبدّل ترتيب السيرفرات أمام المستخدم.
+     */
+    suspend fun aliveSubset(
+        urls: List<String>,
+        referer: String? = null,
+        parallelism: Int = 6
+    ): Set<String> {
+        if (urls.isEmpty()) return emptySet()
+        if (urls.size == 1) return if (alive(urls[0], referer)) setOf(urls[0]) else emptySet()
+        val live = java.util.Collections.synchronizedSet(LinkedHashSet<String>())
+        val gate = Semaphore(parallelism)
+        coroutineScope {
+            urls.map { candidate ->
+                async(Dispatchers.IO) {
+                    gate.withPermit {
+                        if (alive(candidate, referer)) live.add(candidate)
+                    }
+                }
+            }.awaitAll()
+        }
+        return live
     }
 
     /**

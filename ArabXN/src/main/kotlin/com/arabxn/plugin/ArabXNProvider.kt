@@ -4,8 +4,13 @@ import android.content.SharedPreferences
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Element
 import sharedplay.PluginSettings
+import sharedplay.Probe
 import sharedplay.emitChecked
 
 /**
@@ -147,16 +152,35 @@ override suspend fun loadLinks(
         }
 
         if (!found) {
-            for (iframe in document.select("iframe[src]")) {
-                val src = iframe.attr("src").ifBlank { continue }
-                val html = try {
-                    app.get(fixUrl(src), headers = defaultHeaders + ("Referer" to data)).text
-                } catch (_: Exception) { continue }
-                val candidates = Regex("""https?://[^\s"']+\.(?:mp4|m3u8)[^\s"']*""", RegexOption.IGNORE_CASE)
-                    .findAll(html).map { it.value }.distinct()
-                    .filterNot { it.endsWith(".jpg") || it.endsWith(".png") || it.endsWith(".webp") }
-                for (c in candidates) emit(c)
+            // ## الإطارات بالتوازي — لا بالتتابع
+            // كانت كل إطار يُجلب ثم يُفحص كل مرشّح فيه **على حدة**، فالزمن
+            // مجموع لا أقصى. وقاعدة [Probe] أن الفحص الواحد يكلّف مهلة كاملة
+            // إن علّق المضيف، فيصير الانتظار N × مهلة — وهي بالحرف «يجلس يدور
+            // ولا يُظهر شيئاً» المُبلَّغ عنه على هذه الإضافة. فتُجلب الإطارات
+            // معاً، ثم يُفحص المرشّحون في دفعة متوازية واحدة، ثم يُصدَر الحيّ
+            // وحده بترتيب الصفحة فلا يتبدّل ترتيب السيرفرات.
+            val groups = coroutineScope {
+                document.select("iframe[src]").map { iframe ->
+                    async(Dispatchers.IO) {
+                        val src = iframe.attr("src")
+                        if (src.isBlank()) return@async emptyList()
+                        val html = try {
+                            app.get(fixUrl(src), headers = defaultHeaders + ("Referer" to data)).text
+                        } catch (_: Exception) {
+                            return@async emptyList()
+                        }
+                        Regex("""https?://[^\s"']+\.(?:mp4|m3u8)[^\s"']*""", RegexOption.IGNORE_CASE)
+                            .findAll(html).map { it.value }
+                            .filterNot {
+                                it.endsWith(".jpg") || it.endsWith(".png") || it.endsWith(".webp")
+                            }
+                            .toList()
+                    }
+                }.awaitAll()
             }
+            val candidates = groups.flatten().distinct()
+            val live = Probe.aliveSubset(candidates, mainUrl)
+            for (c in candidates) if (c in live) emit(c)
         }
 
         return found

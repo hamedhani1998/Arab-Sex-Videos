@@ -2,7 +2,7 @@ android {
     namespace = "com.arbada.plugin"
 }
 
-version = 3
+version = 4
 
 cloudstream {
     description = "إضافة العربدة - أفلام إباحية عربية"

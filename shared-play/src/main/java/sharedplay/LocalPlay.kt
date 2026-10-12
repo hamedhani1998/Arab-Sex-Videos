@@ -116,6 +116,14 @@ object LocalPlay {
                     type = if (isHls(u)) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
                     this.referer = ref
+                    // نوع المحتوى إلزامي عملياً: بلا هذه الترويسة يبني المشغّل
+                    // بيانات وصفية نوعها `null`، ويُقاس أن `FfmpegVideoRenderer`
+                    // يرمي NPE عليها في مسار اختيار الصوت. فتُشتقّ من الامتداد
+                    // هنا كما تفعل [Family.deliver] بالحرف.
+                    this.headers = mapOf(
+                        "Referer" to ref,
+                        "Content-Type" to Probe.rt(u)
+                    )
                     this.quality = declaredQuality
                 }
             )

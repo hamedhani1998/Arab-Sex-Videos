@@ -2,7 +2,7 @@ android {
     namespace = "com.arabnok.plugin"
 }
 
-version = 3
+version = 4
 
 cloudstream {
     description = "إضافة عرب نوك - أفلام إباحية عربية"

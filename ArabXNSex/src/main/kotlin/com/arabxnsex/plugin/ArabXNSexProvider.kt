@@ -4,8 +4,15 @@ import android.content.SharedPreferences
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import org.jsoup.nodes.Element
 import sharedplay.PluginSettings
+import sharedplay.Probe
 import sharedplay.emitChecked
 
 /**
@@ -150,24 +157,61 @@ override suspend fun loadLinks(
 
         // حلّ 302 إلى رابط CDN النهائي (يحمل token بلا حاجة جلسة) عبر HEAD — بدون تحميل جسم الملف.
         // الشغّل لا يعرف كيف يمرر Cookie، لذلك نسلّمه CDN مباشرة.
-        for ((candidate, q) in pairs) {
-            val getFile = candidate.removePrefix("function/0/")
-            if (!getFile.contains(".mp4") && !getFile.contains(".m3u8")) continue
-            val reqHeaders = buildMap {
-                put("Referer", mainUrl)
-                cookieHeader?.let { put("Cookie", it) }
-            }
-            val cdn = try {
-                val head = app.head(fixUrl(getFile), headers = reqHeaders)
-                // المتابعة التلقائية للـ redirect: url النهائي؛ وإلا نقرأ Location يدوياً
-                var finalUrl = head.url.toString()
-                val loc = head.headers["Location"]
-                if (!finalUrl.contains("cdn.arabxn.sex")) finalUrl = loc?.takeIf { it.contains(".mp4") }.orEmpty()
-                finalUrl
-            } catch (_: Exception) {
-                fixUrl(getFile) // احتياط: لو فشل HEAD نرسل get_file (قد ينجح بالصدفة لكن غالباً 410)
-            }
-            if (!cdn.contains(".mp4") && !cdn.contains(".m3u8")) continue
+        //
+        // ## لماذا بالتوازي هنا — مصدر خطأ 2002
+        // القياس على أربع صفحات (2026-10-12): كل صفحة فيها **رابط CDN حيّ
+        // واحد** و1–2 رابط `get_file/1/<hash>` ميت يردّ 404. وتنفيذها بالتتابع
+        // كما كان **يجمع** الأزمنة: HEAD (2.0–2.5 ث) ثم فحص GET (1.0–3.2 ث)
+        // لكل رابط، فأسوأ صفحة فيها ثلاثة مرشّحين تكلّف **10.0 ثانية** قبل أن
+        // يصل أول رابط إلى المشغّل. هذا هو خطأ 2002 (مهلة الاتصال) بعينه —
+        // لا رابطٌ ميت بذاته. والتوازي يجعل الزمن أقصى الفروع لا مجموعها.
+        //
+        // وقاعدة توفير: ما ردّ HEAD عليه بغير 2xx محكوم عليه بالموت، فلا
+        // يُكلَّف طلب فحص GET أصلاً.
+        val probeOn = prefs?.getBoolean(PluginSettings.probeKey(PREFS_NAME), true) ?: true
+        val reqHeaders = buildMap {
+            put("Referer", mainUrl)
+            cookieHeader?.let { put("Cookie", it) }
+        }
+        val resolved = coroutineScope {
+            val gate = Semaphore(6)
+            pairs.entries.map { (candidate, q) ->
+                async(Dispatchers.IO) {
+                    gate.withPermit {
+                        val getFile = candidate.removePrefix("function/0/")
+                        if (!getFile.contains(".mp4") && !getFile.contains(".m3u8")) {
+                            return@withPermit null
+                        }
+                        val (headCode, cdn) = try {
+                            val head = app.head(fixUrl(getFile), headers = reqHeaders)
+                            // المتابعة التلقائية للـ redirect: url النهائي؛ وإلا نقرأ Location يدوياً
+                            var finalUrl = head.url
+                            val loc = head.headers["Location"]
+                            if (!finalUrl.contains("cdn.arabxn.sex")) {
+                                finalUrl = loc?.takeIf { it.contains(".mp4") }.orEmpty()
+                            }
+                            head.code to finalUrl
+                        } catch (_: Exception) {
+                            // احتياط: لو فشل HEAD نرسل get_file (قد ينجح بالصدفة
+                            // لكن غالباً 410) — والفحص أدناه هو ما يمنعه.
+                            0 to fixUrl(getFile)
+                        }
+                        if (headCode !in 200..299) return@withPermit null
+                        if (!cdn.contains(".mp4") && !cdn.contains(".m3u8")) {
+                            return@withPermit null
+                        }
+                        // فحص GET بشكل المشغّل — والرابط الميت (احتياطي يردّ 410)
+                        // لا يصل المشغّل منعاً لخطأ 2004.
+                        if (probeOn && !Probe.alive(cdn, mainUrl)) return@withPermit null
+                        cdn to q
+                    }
+                }
+            }.awaitAll().filterNotNull()
+        }
+
+        val seen = HashSet<String>()
+        for ((cdn, q) in resolved) {
+            if (!seen.add(cdn)) continue
             val label = buildString {
                 append("arabxn")
                 when {
@@ -175,16 +219,17 @@ override suspend fun loadLinks(
                     hasHdBadge -> append(" • HD")
                 }
             }
-            // فحص + وسم بخياري الإضافة: الرابط الميت لا يصل المشغّل (منعاً لخطأ
-            // 2004)، والصيغة تُكتب في الاسم فيُعرف MP4 من M3U8 قبل الضغط.
-            // (رابط احتياطي هنا غالباً 410، والفحص هو ما يمنعه من الوصول.)
+            // الفحص وقع أعلاه داخل الدفعة المتوازية، فلا يُعاد هنا (probe=false):
+            // إعادته تُضاعف كلفة كل رابط وتُبطل ما بُني لأجله التوازي.
+            // والوسم بخيار الإضافة: الصيغة تُكتب في الاسم فيُعرف MP4 من M3U8
+            // قبل الضغط.
             if (emitChecked(
                     url = cdn,
                     name = label,
                     referer = mainUrl,
                     quality = q,
                     callback = callback,
-                    probe = prefs?.getBoolean(PluginSettings.probeKey(PREFS_NAME), true) ?: true,
+                    probe = false,
                     tag = prefs?.getBoolean(PluginSettings.tagKey(PREFS_NAME), true) ?: true
                 )
             ) found = true

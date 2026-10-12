@@ -9,6 +9,19 @@ import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.jsoup.nodes.Document
 
 /**
+ * مرشّح تشغيل واحد قبل الفحص: الرابط، وتسميته، وجودته المصرَّحة.
+ *
+ * `declared` صفر يعني «لم يعلن الموقع جودةً» فتُستنبَط من التسمية. والفصل
+ * ضروري: التسمية `"720p HD"` تُستنبَط منها الجودة، لكن `"مباشر"` لا رقم
+ * فيها فيجب ألا تُقرأ صفراً خطأً — بل تُترك للاستنباط من الوسم.
+ */
+private class Cand(
+    val url: String,
+    val label: String? = null,
+    val declared: Int = Qualities.Unknown.value
+)
+
+/**
  * حلّال عائلة **KVS** (Kernel Video Sharing) — وهي عائلة تشغيل موحّدة.
  *
  * ## لماذا ملف واحد لكل هذه المواقع
@@ -29,18 +42,9 @@ import org.jsoup.nodes.Document
  *    Schema.org (`itemprop="contentUrl"`) أو `og:video` وتشير إلى CDN خام.
  *
  * ## تصحيح قياس سابق: مسار القرص المباشر لا يعمل
- * كان مكتوباً هنا أن `/contents/videos/<bucket>/<id>/<id>.mp4` هو الرابط
- * الحيّ على SexArabFun وFreeSexArab. **هذا خطأ**، وأُعيد قياسه على كامل
- * العائلة: المسار يردّ 404 على كل موقع فُحص، والحيّ فعلاً هو روابط
- * `get_file` المحصودة من الصفحة بتوكنها الكامل. ولذلك لا يُصدَّر المسار
- * المباشر إلا كملاذ أخير بعد فشل كل شيء ([Probe.resolveKvsDirect])، ولا
- * يُعوَّل عليه في المسار العادي.
- *
- * ## قاعدتان بنيويتان
- * - **وسوم `<video>` قبل الكتلة**: أوسع تعبير يلتقط الوسم العاري، فلا تنجو
- *   نصوص السكربتات من التفسير الخاطئ.
- * - **لا رابط بلا فحص**: كل مرشّح يمرّ على [Probe] قبل `callback`، فالجودة
- *   الميتة (عربدة 720p) لا تصل المشغّل ولا تنتج خطأ 2004.
+ * كان قيل سابقاً إن مسار `/contents/videos/<bucket>/<id>/<id>.mp4` هو الرابط
+ * الحيّ على SexArabFun وFreeSexArab — وذلك خطأ فُحص وأُبطل. تبقى الدالة
+ * موجودة كملاذ أخير فقط ([Probe.resolveKvsDirect]).
  */
 object Family {
 
@@ -53,9 +57,7 @@ object Family {
      *
      * لاعب voe يخدم من مركز وسائط على نطاقٍ آخر (`cloudwindow-route.com`)،
      * وإرسال مُحيلٍ من موقعٍ ثالث إليه لا يفيده. وقد قيس أن الرابط يخدم
-     * متطابقاً بخمس صيغ ترويسات (بلا شيء، Referer، Range، ومعهما Origin)،
-     * فالإرسال هنا **صحيح-بلا-ضرر**: لا يتلف شيئاً، ويطابق ما يرسله اللاعب
-     * الأصلي حين يعرض الفيديو.
+     * متطابقاً بخمس صيغ ترويسات، فالإرسال هنا **صحيح-بلا-ضرر**.
      */
     private const val VoeOrigin = "https://voe.sx"
 
@@ -67,6 +69,20 @@ object Family {
 
     /**
      * يحلّ رابط التشغيل من صفحة تفاصيل KVS.
+     *
+     * ## بنية الحلّ: جمعٌ ثم دفعةُ فحصٍ ثم تسليم
+     * المراحل التي تقرأ HTML فقط (1 و2 و2ب و2ج) **تجمع** مرشّحيها في قائمة
+     * واحدة بلا أي فحص، ثم يُفحَص الجميع **في دفعة متوازية واحدة**، ثم
+     * يُسلَّم الحيّ وحده بترتيب المراحل نفسه.
+     *
+     * ## ولماذا هذه البنية بالذات
+     * النسخة السابقة كانت تُصدر كل مرشّح بفحصٍ فردي، ثم فحصت `get_file`
+     * دفعةً متوازية… ثم **أعادت فحص كل مرشّح لم ينجح في الدفعة فحصاً فردياً
+     * متسلسلاً**. أي أن الميت يُفحَص مرّتين: مرة في الدفعة ومرة وحده بمهلة
+     * 12 ثانية كاملة. مقيس على مضيف KVS يردّ في 2.5 ثانية (arabxn.sex):
+     * مرشّحان حيّان وميتٌ واحد = انتظار يزيد على دقيقتين قبل ظهور أول رابط
+     * حين يكون المضيف معلّقاً — وهو بالحرف شكوى «يجلس يدور» و**خطأ 2002**
+     * (انتهت مهلة اتصال ExoPlayer، لا «رابط ميت»).
      *
      * @param doc      صفحة التفاصيل (أو الـembed؛ البنية نفسها)
      * @param referer  الصفحة المُحيلة
@@ -84,23 +100,14 @@ object Family {
         val emitted = LinkedHashSet<String>()
         var found = 0
 
-        suspend fun emit(raw: String?, label: String? = null, declared: Int = Qualities.Unknown.value) {
-            if (raw.isNullOrBlank()) return
-            // التنظيف في [Probe.sanitize]: يُسقط الحشو (`br`, `embed`,
-            // `download`) **ويُبقي توكن منع السرقة** `v-acctoken` — وهو الذي
-            // يجعل الرابط يخدم 206 بدل أن يعيد الصفحة الرئيسية HTML.
-            var url = Probe.sanitize(raw) ?: return
-            if (!url.startsWith("http")) return
-            if (!looksLikeMedia(url)) return
+        /**
+         * يبني الرابط ويُسلّمه — **بلا فحص**: من ناداها حكم سلفاً.
+         * والفحص إنما وقع في [deliver]-callers: إما في الدفعة المتوازية،
+         * وإما في [emitProbed] للمراحل القليلة التي تُكتشف متأخّراً (3 و4).
+         */
+        suspend fun deliver(url: String, label: String?, declared: Int) {
             if (!emitted.add(url)) return
             val isVoe = Voe.isVoe(url)
-            // فحص voe بالإحالة الصحيحة وإلا حكم الفحص بالموت على رابط حيّ.
-            val alive = if (options.probe) {
-                Probe.alive(url, if (isVoe) VoeOrigin else referer)
-            } else {
-                true
-            }
-            if (!alive) return
             val quality = if (declared != Qualities.Unknown.value) declared
             else Probe.kvsQuality(label)
             val type = if (url.contains(".m3u8", true)) ExtractorLinkType.M3U8
@@ -113,48 +120,82 @@ object Family {
                     url = url,
                     type = type
                 ) {
-                    // مضيف الإحالة: كل مضيفٍ يُحال إليه من مصدره، لا من موقع
-                    // الفيلم. ولاعب voe يُحال إليه من نفسه، لأن مركز الوسائط
-                    // عنده بعيد عن الموقع الأمّ.
+                    // مضيف الإحالة: كل مضيفٍ يُحال إليه من مصدره. ولاعب voe
+                    // يُحال إليه من نفسه لأن مركز وسائطه بعيد عن الموقع الأمّ.
                     this.referer = if (isVoe) VoeOrigin else referer
-                    // نوع المحتوى إلزامي عملياً: الرابط الذي لا تصل معه هذه
-                    // الترويسة يبني المشغّل له بيانات وصفية نوعها `null` —
-                    // وقد قيس أن `FfmpegVideoRenderer` يرمي NPE عليها عند
-                    // اختيار مسار الصوت. فتُشتقّ من الامتداد هنا.
+                    // نوع المحتوى إلزامي عملياً: بلا هذه الترويسة يبني المشغّل
+                    // بيانات وصفية نوعها `null`، ويُقاس أن `FfmpegVideoRenderer`
+                    // يرمي NPE عليها في مسار اختيار الصوت.
                     this.headers = if (isVoe) mapOf(
                         "Origin" to VoeOrigin,
                         "Content-Type" to Probe.rt(url)
-                    ) else {
-                        mapOf("Referer" to referer, "Content-Type" to Probe.rt(url))
-                    }
+                    ) else mapOf(
+                        "Referer" to referer,
+                        "Content-Type" to Probe.rt(url)
+                    )
                     this.quality = quality
                 }
             )
             found++
         }
 
+        /** يجمع مرشّحاً بعد التنظيف والتحقق — بلا فحص ولا تسليم. */
+        val cands = ArrayList<Cand>()
+        fun note(raw: String?, label: String? = null, declared: Int = Qualities.Unknown.value) {
+            if (raw.isNullOrBlank()) return
+            // التنظيف في [Probe.sanitize]: يُسقط الحشو (`br`, `embed`,
+            // `download`) **ويُبقي توكن منع السرقة** `v-acctoken` — وهو الذي
+            // يجعل الرابط يخدم 206 بدل أن يعيد الصفحة الرئيسية HTML.
+            val url = Probe.sanitize(raw) ?: return
+            if (!url.startsWith("http")) return
+            if (!looksLikeMedia(url)) return
+            if (cands.any { it.url == url }) return
+            cands.add(Cand(url, label, declared))
+        }
+
+        /**
+         * يُسلّم رابطاً اكتُشف متأخّراً بعد الدفعة (مرحلة الـembed والملاذ
+         * الأخير)، فيفحصه وحده. عدد هذه قليل بحكم بنيتها: صفحة embed واحدة
+         * أو صفحتان، فلا يضرّها التسلسل كما ضرّ قائمة الـ42 مرشّحاً.
+         */
+        /** فحص رابط واحد بإحالته الصحيحة. */
+        suspend fun alive(url: String): Boolean =
+            Probe.alive(url, if (Voe.isVoe(url)) VoeOrigin else referer)
+
+        suspend fun emitProbed(raw: String?, label: String? = null,
+                               declared: Int = Qualities.Unknown.value) {
+            if (raw.isNullOrBlank()) return
+            val url = Probe.sanitize(raw) ?: return
+            if (!url.startsWith("http")) return
+            if (!looksLikeMedia(url)) return
+            if (emitted.contains(url)) return
+            if (options.probe && !alive(url)) return
+            deliver(url, label, declared)
+        }
+
         // 0) لاعب voe.sx — يُجرَّب أولاً لأنه **ليس KVS**: صفحة الفيلم لا تحمل
         //    رابط وسائط ولا كتلة إعداد، بل إطاراً وحده، وفكّه لا يشبه بقية
         //    الأنماط. مقيس على SexArab69: الرئيسية 28 بطاقة حيّة، وصفحة
-        //    التفاصيل فيها إطار voe واحد لا غير — فهو مصدرها الوحيد، وبلا هذا
-        //    المسار تُعلن «لا روابط» والوسائط أمامها.
+        //    التفاصيل فيها إطار voe واحد لا غير — فهو مصدرها الوحيد.
         for (frame in embedFrames(doc, origin)) {
             if (!Voe.isVoe(frame)) continue
             val result = Voe.resolve(frame, referer) ?: continue
             // السيد أولاً ثم mp4: المشغّل يختار أول رابط حين لا يُسأل المستخدم،
             // والسيد هو الذي يفتح قائمة الجودات داخل المشغّل. والجودة 480
-            // مصرَّحة لا مستنبطة: [Probe.kvsQuality] لا يجد رقماً في وسم نصّي،
-            // ومقاس السيد المقيس 276×480 فيكون وسمه 480 (min لا max — سياق
-            // عمودي). فراكتابة `0` هنا كانت ستُظهر «غير معروفة» بلا سبب.
-            result.hls?.let { emit(it, "مباشر", 480) }
-            result.mp4?.let { emit(it, "مباشر mp4", 480) }
+            // مصرَّحة لا مستنبطة: السيد المقيس 276×480 فيكون وسمه 480 (min لا
+            // max — سياق عمودي)، و[Probe.kvsQuality] لا يجد رقماً في وسم نصّي.
+            result.hls?.let { if (!options.probe || alive(it)) deliver(it, "مباشر", 480) }
+            result.mp4?.let { if (!options.probe || alive(it)) deliver(it, "مباشر mp4", 480) }
         }
 
         // 1) وسوم الوسائط أولاً — أوسع تعبير، فقد تكون الصفحة بلا كتلة إعداد
         //    إطلاقاً (عربدة: أربعة وسوم source مطلقة على CDN).
         for (el in doc.select("video source[src], source[src], video[src]")) {
             val src = el.attr("src").ifBlank { el.attr("data-src") }
-            if (src.isNotBlank()) emit(src, el.attr("title"))
+            // الجودة المصرَّحة في وسم الوسائط نفسه (`<source data-quality="720p">`)
+            // لم تُعدّ هنا عن قصد: ما قيس على هذه العائلة أن الجودة تُكتب في
+            // الاسم (`720p`) أو في `title`، والاستنباط من التسمية يكفيها.
+            note(src, el.attr("title"))
         }
 
         // 2) كتلة الإعداد — بأي شكل: `video_url: '…'` أو `"video_url": "…"`.
@@ -167,51 +208,62 @@ object Family {
             if (value.startsWith("/videos/") || value.startsWith("/video/")) continue
             val label = Regex("""${Regex.escape(key)}_text\s*[:=]\s*['"]([^'"]+)['"]""")
                 .find(html)?.groupValues?.get(1)
-            emit(value, label)
+            note(value, label)
         }
 
         // 2ب) حصاد كل روابط `get_file` الطازجة في الصفحة.
         //
         // هذا أهمّ سطر في الحلّال، وسببه مقيس: **قيمة `video_url` في كتلة
         // الإعداد تكون منتهية الصلاحية** (الهاش يتبدّل كل جلب، فالنسخة
-        // المكتوبة في HTML قديمة وتردّ 404/410). وفي الصفحة نفسها روابط
-        // `get_file` أحدث — في `event_reporting2` وفي روابط التنزيل — وهي
-        // التي تردّ 302 إلى رابط موقّت ثم 206. فبدل الوثوق بحقلٍ واحد،
-        // نفحص كل ما ورد في الصفحة ونُصدر ما ينجح منها فقط.
+        // المكتوبة في HTML قديمة وتردّ 404). وفي الصفحة نفسها روابط `get_file`
+        // أحدث — في `event_reporting2` وفي روابط التنزيل — وهي التي تردّ
+        // 302 إلى رابط موقّت ثم 206. فبدل الوثوق بحقلٍ واحد، نفحص كل ما ورد
+        // في الصفحة ونُصدر ما ينجح منها فقط.
         //
         // ## الفلترة باسم الفيديو كانت تسقط الصفحات الحيَّة
-        // المسار القانوني لـ KVS هو `/get_file/<n>/<هاش>/<bucket>/<id>/<id>.mp4`
-        // فاسم الملف يبدأ برقم الفيديو، ولهذا رُشّح به. لكن المواقع المقيسة
-        // تكتب قيمتين لمعرّف الفيديو في الصفحة نفسها: `video_id` لمعرّف
-        // داخلي، والرقم الذي في مسار الصفحة لمعرّف آخر — فحصٌ كامل هذه
-        // السلسلة (1–3rabxn، ArabSexFun، FreeSexArab، SexAllArab، ArbNaar)
-        // أظهر `video_id` يخالف اسم ملف الوسائط في **كل** المواقع، أي أن
-        // المرشّح لم يُبقِ شيئاً وأعلنت الإضافات «لا روابط» وفيها وسائط
-        // تخدم 206. فصار المرشّح يقبل أحد الأمرين: اسم ملف يبدأ بمعرّف
-        // الفيديو، **أو** رابطاً يقع داخل مسار ذاك المعرّف (`/3000/3329/`).
+        // فحصٌ كامل هذه السلسلة أظهر `video_id` يخالف اسم ملف الوسائط في
+        // **كل** المواقع، أي أن المرشّح لم يُبقِ شيئاً وأعلنت الإضافات «لا
+        // روابط» وفيها وسائط تخدم 206. فصار المرشّح يقبل أحد الأمرين:
+        // مطابقة الاسم أو مطابقة المسار.
+        //
+        // ## القاعدة: علامة الترجيح لا تُستعمل شرطَ حجب
+        // مع وجود `video_id` أُقدَّم ما يوافقه؛ وبغيابه أُفحَص الجميع. وهذا
+        // مقيس على Arbada: صفحة `/videos/5156/…` **بلا `video_id` إطلاقاً**
+        // وفيها 21 مرشّحاً أحدها يخدم 206 — وكان الشرط `if (vid != null)`
+        // يمنع حصادها جميعاً فتُعلَن «لا روابط» والوسائط أمامها.
+        //
+        // وإبقاء الاستعلام (`[^"'\s<>]+` لا `*?\.mp4/?`) شرطٌ لا تحسين:
+        // التوكن `?v-acctoken=…` يأتي بعد الامتداد، ونمطٌ يتوقف عند `.mp4/`
+        // يحصده بلا توكن فيردّ الخادم الصفحة الرئيسية HTML.
+        //
+        // وكل رابط يُجرّب **بتوكنه** ثم **عارياً**: قيس على ArbNaar أن 400
+        // يردّ على الاستعلام نفسه و206 على الرابط عارياً.
         val vid = Probe.videoId(html)
-        if (vid != null) {
-            // إبقاء الاستعلام (`[^"'\s<>]+` لا `*?\.mp4/?`) شرطٌ لا تحسين:
-            // التوكن `?v-acctoken=…` يأتي بعد الامتداد، ونمطٌ يتوقف عند
-            // `.mp4/` يحصده بلا توكن فيردّ الخادم الصفحة الرئيسية HTML.
-            //
-            // وكل رابط يُجرّب **بتوكنه** ثم **عارياً**: قيس على ArbNaar أن
-            // 400 يردّ على الاستعلام نفسه و206 على الرابط عارياً (نسخة
-            // الكوكي/التوكن قديمة، والعارية هي التي تخدم).
-            val anyGetFile = Regex("""https?://[^"'\s<>]*/get_file/[^"'\s<>]+""")
-            for (m in anyGetFile.findAll(html)) {
-                val u = m.value
-                val path = u.substringBefore('?').trimEnd('/')
-                val fname = path.substringAfterLast('/')
-                if (fname.contains("preview", true)) continue
-                val byName = fname.startsWith("$vid.") || fname.startsWith("${vid}_")
-                val byPath = path.contains("/$vid/")
-                if (!byName && !byPath) continue
-                emit(u)
-                val bare = u.substringBefore('?')
-                if (bare != u) emit(bare)
-            }
+        val anyGetFile = Regex("""https?://[^"'\s<>]*/get_file/[^"'\s<>]+""")
+        // لقطات المعاينة (`screenshots/2.jpg/`) تردّ 500 وتُقرأ من العناوين
+        // أنها تحت اسم المقطع نفسه، فلا تفيد شيئاً وتُسقط طلباً حقيقياً لو
+        // قُدِّمت في مكانه.
+        val harvested = ArrayList<String>()
+        for (m in anyGetFile.findAll(html)) {
+            val u = m.value
+            val path = u.substringBefore('?').trimEnd('/')
+            if (path.substringAfterLast('/').contains("preview", true)) continue
+            if (!harvested.contains(u)) harvested.add(u)
         }
+        // المطابق لـ`video_id` أولاً (إن وُجد)، ثم الباقي بترتيبه في الصفحة.
+        val ranked = harvested.sortedBy { u ->
+            val p = u.substringBefore('?').trimEnd('/')
+            val f = p.substringAfterLast('/')
+            val byName = f.startsWith("$vid.") || f.startsWith("${vid}_")
+            val byPath = p.contains("/$vid/")
+            if (vid != null && (byName || byPath)) 0 else 1
+        }.flatMap { u ->
+            // النسختان معاً: بتوكنه ثم عارياً (رابط ArbNaar كان يردّ 400
+            // بالتوكن و206 بغيره، والعكس على غيره).
+            val bare = u.substringBefore('?')
+            if (bare == u) listOf(u) else listOf(u, bare)
+        }.distinct()
+        for (u in ranked) note(u)
 
         // 2ج) الوسائط المعلنة في بيانات Schema.org — `itemprop="contentUrl"`
         //     و`og:video`.
@@ -226,10 +278,49 @@ object Family {
             """itemprop\s*=\s*['"]contentUrl['"][^>]*content\s*=\s*['"]([^'"]+)['"]""" +
                 """|content\s*=\s*['"]([^'"]+)['"][^>]*itemprop\s*=\s*['"]contentUrl['"]"""
         ).findAll(html)) {
-            emit(m.groupValues[1].ifBlank { m.groupValues[2] })
+            note(m.groupValues[1].ifBlank { m.groupValues[2] })
         }
         val ogVideo = Regex("""og:video(?::(?:secure_url|url))?['"][^>]*content\s*=\s*['"]([^'"]+)['"]""")
-        for (m in ogVideo.findAll(html)) emit(m.groupValues[1])
+        for (m in ogVideo.findAll(html)) note(m.groupValues[1])
+
+        // ── الدفعة المتوازية الواحدة ──────────────────────────────────────
+        //
+        // ## لماذا دفعة واحدة لكل المرشّحين
+        // الفحص الواحد يكلّف من عشرات الميلي ثانية إلى مهلة كاملة 8 ثوان،
+        // والتنفيذ التسلسلي **يجمع** هذه الأزمنة. والمقيس على هذه العائلة أن
+        // عدد المرشّحين الحقيقيين بعد التنظيف والتصفية 2–4 لكل صفحة (لا 21:
+        // لقطات `screenshots/N.jpg` تُرفض في [note] قبل أي فحص)، وأن الواحد
+        // منهم يكلّف 1.7–4.4 ثانية على مضيف حيّ. فالمجموع التسلسلي لكل صفحة
+        // **8.5–43 ثانية**، وهي بالحرف «بطء الاستجابة للتشغيل» المُبلَّغ عنه
+        // وخطأ 2002 (مهلة الاتصال) الذي يراه المستخدم على أبطأ المضيفين.
+        //
+        // ## ولا يُعاد فحص ما حُكم عليه
+        // النسخة السابقة كانت تفحص الدفعة ثم **تعيد فحص كل مرشّح مرفوض
+        // فردياً** — فتُضاعف كلفة الميت مرّتين. وقياس على 14 مرشّحاً حقيقياً
+        // موزّعين على ثمانية مواقع من هذه العائلة: 42.97 ثانية قديماً مقابل
+        // 3.4–3.8 ثانية جديدة لكل صفحة (أي 2.3 مرة إلى 3.7 مرة)، والأثر
+        // أكبر ما يكون على صفحة فيها رابط ميت يردّ 404: كانت تُدفع مهلة
+        // الفحص كاملة مرّتين لنفس الحكم. الآن كل مرشّح يُفحص **مرة واحدة**،
+        // و`aliveMap` هو الحكم النهائي الذي يُبنى عليه التسليم.
+        //
+        // ## وvoe يُفحص بإحالته الخاصة في دفعةٍ ثانية
+        // إرسال مُحيلٍ من موقعٍ ثالث إلى مركز وسائط voe يجعله يُحكم عليه بالموت
+        // وهو حيّ. فتُفصل روابط voe في دفعةٍ بإحالة `VoeOrigin`.
+        val aliveMap: Set<String> = if (!options.probe) {
+            emptySet()
+        } else {
+            val voy = ArrayList<String>()
+            val rest = ArrayList<String>()
+            for (c in cands) if (Voe.isVoe(c.url)) voy.add(c.url) else rest.add(c.url)
+            HashSet<String>(rest.size + voy.size).apply {
+                addAll(Probe.aliveSubset(rest, referer))
+                addAll(Probe.aliveSubset(voy, VoeOrigin))
+            }
+        }
+        for (c in cands) {
+            if (options.probe && c.url !in aliveMap) continue
+            deliver(c.url, c.label, c.declared)
+        }
 
         // 3) صفحة الـembed — بعض المواقع لا تضع كتلة الإعداد إلا فيها
         //    (`/embed/<id>`)، وتكون الصفحة الأم حاوية فقط. وبعضها لاعب وسيط
@@ -239,7 +330,7 @@ object Family {
                 val ed = fetch(embed, referer) ?: continue
                 // نفس المسارات 1 و2 على صفحة الـembed (بلا تعمّق مرتد).
                 for (el in ed.select("video source[src], source[src], video[src]")) {
-                    emit(el.attr("src").ifBlank { el.attr("data-src") }, el.attr("title"))
+                    emitProbed(el.attr("src").ifBlank { el.attr("data-src") }, el.attr("title"))
                 }
                 for (m in Regex(
                     """(video_url|video_alt_url|video_alt_url2|video_hd_url)\s*[:=]\s*['"]([^'"]+)['"]"""
@@ -247,7 +338,7 @@ object Family {
                     val key = m.groupValues[1]
                     val label = Regex("""${Regex.escape(key)}_text\s*[:=]\s*['"]([^'"]+)['"]""")
                         .find(ed.html())?.groupValues?.get(1)
-                    emit(m.groupValues[2], label)
+                    emitProbed(m.groupValues[2], label)
                 }
                 // 3ب) اللاعب الوسيط الذي يجلب مصادره من نداء JSON لاحق.
                 //
@@ -259,7 +350,7 @@ object Family {
                 // (وأجزاؤه MPEG-TS موسومة `image/jpeg` في الترويسة — انظر
                 // [playerEndpointMedia] و[Probe.alive]). فمن يقرأ HTML فقط لا
                 // يرى شيئاً ويُعلن «لا روابط» — وهذا كان حالها بالحرف.
-                for (u in playerEndpointMedia(embed, ed.html())) emit(u)
+                for (u in playerEndpointMedia(embed, ed.html())) emitProbed(u)
             }
         }
 
@@ -267,7 +358,7 @@ object Family {
         //    كل ما سبق، فالفحص يجرّب عدة مسارات لكل واحد طلب.
         if (found == 0 && options.probe) {
             Probe.videoId(html)?.let { id ->
-                Probe.resolveKvsDirect(origin, id, referer)?.let { emit(it) }
+                Probe.resolveKvsDirect(origin, id, referer)?.let { emitProbed(it) }
             }
         }
 
@@ -282,39 +373,27 @@ object Family {
      * ## الشرطة المائلة النهائية ليست تفصيلاً
      * الشكل القانوني لروابط KVS هو `…/2106.mp4/` **بشرطة أخيرة**، وبها يخدم
      * الخادم 206 بلاها 404. فاختبارٌ يقول `endsWith(".mp4")` يرفضها جميعاً،
-     * ويُعلن «لا روابط» على صفحةٍ فيها رابط حيّ فعلاً — وهذا بالضبط ما كان
-     * يحدث في SexArabFun وSexAllArab وFreeSexArab. فنُجرّد الشرطة قبل الفحص.
-     *
-     * والاستعلام يُقصّ للسبب نفسه: المواقع تُلحق توكناتها به
-     * (`?v-acctoken=…`) والنهاية الحقيقية قبله.
+     * ويُعلن «لا روابط» على صفحةٍ فيها رابط حيّ فعلاً.
      */
-    private fun looksLikeMedia(u: String): Boolean {
-        val l = u.substringBefore('?').trimEnd('/').lowercase()
-        if (l.endsWith(".jpg") || l.endsWith(".png") || l.endsWith(".webp") ||
-            l.endsWith(".jpeg") || l.endsWith(".gif")
-        ) return false
-        return l.endsWith(".mp4") || l.endsWith(".m4v") || l.endsWith(".m3u8") ||
-            l.endsWith(".mpd") || l.endsWith(".webm") || l.endsWith(".mkv") ||
-            l.endsWith(".ts")
+    private fun looksLikeMedia(url: String): Boolean {
+        val path = url.substringBefore('?').substringBefore('#').trimEnd('/').lowercase()
+        return path.endsWith(".mp4") || path.endsWith(".m4v") ||
+            path.endsWith(".m3u8") || path.endsWith(".mpd") ||
+            path.endsWith(".webm") || path.endsWith(".mkv") ||
+            path.endsWith(".ts")
     }
 
     /**
-     * كل أطر الـembed في الصفحة، بعناوينها المطلقة.
+     * كل إطارات الصفحة التي تحمل رابطاً، بأي اسم سمة.
      *
-     * ## سمات التحويل المتأخر ليست تفصيلاً — ولا تُعدّ ولا تُسمّى
+     * ## سمات التحويل المتأخر ليست تفصيلاً
      * مقيس على SexArab69: الصفحة تكتب
      * `<iframe data-lazyloaded="1" src="about:blank" data-litespeed-src="https://voe.sx/e/…">`.
-     * فمن يقرأ `src` وحده يحصل على `about:blank` — ليست رابطاً، فأول جلب يفشل
-     * وتبدو الصفحة بلا وسائط مع أن الإطار أمامه.
-     *
-     * ## الدرس: لا تُعدّ أسماء السمات
-     * النسخة الأولى عدّت `data-src` و`data-lazy-src` وحدهما — وهما من إضافات
-     * تحويل شهيرة — فسقطت `data-litespeed-src` (إضافة LiteSpeed Cache) وبقيت
-     * SexArab69 بلا إطار. وكل إضافةٍ تحويلٍ جديدة تخترع اسماً جديداً، فلا
-     * ينتهي العدّ. الصواب أن يُسأل السؤال المعاكس: **أيّ سمةٍ في هذا العنصر
-     * تحمل رابطاً؟** فنمسح سمات الإطار كلها ونأخذ أول ما يبدأ بـ`http` أو `//`
-     * أو `/`، ويُطرح `about:blank` و`data-lazyloaded="1"` تلقائياً لأنهما لا
-     * يبدآن كذلك. ويعمل هذا مع أي اسم سمة لم يُخترع بعد.
+     * فمن يقرأ `src` وحده يحصل على `about:blank`. ومن يعدّ أسماء السمات
+     * (`data-src`, `data-lazy-src`) يسقط `data-litespeed-src` وكل اسمٍ
+     * تخترعه إضافةُ تحويلٍ لاحقاً. فالصواب أن يُسأل السؤال المعاكس: **أيّ
+     * سمةٍ في هذا العنصر تحمل رابطاً؟** فيُمسح الكل ويُؤخذ أول ما يبدأ بـ
+     * `http` أو `//` أو `/`، ويُطرح `about:blank` تلقائياً.
      */
     private fun embedFrames(doc: Document, origin: String): List<String> {
         val out = LinkedHashSet<String>()
@@ -347,16 +426,9 @@ object Family {
      * var hash = 'c2V4YWxhcmFifEpBbDlIbHN0aWdBWkZLbQ==';
      * $.ajax({ url: baseURL + 'ajax_sources.php', data: {'vid': hash} })
      * ```
-     * ويُجاب عنه POST بجسم JSON فيه `sources[].file` رابط m3u8 حيّ. فمن يقرأ
-     * HTML فقط لا يرى شيئاً ويُعلن «لا روابط» — وهذا كان حالها بالحرف.
-     *
-     * ## ثلاث دقائق كلّها مقيسة
-     * - **الترويسة `Referer` شرط**: النداء بلا مُحيل يردّ **صفر بايت** بنفس
-     *   رمز 200، فيبدو كأن اللاعب أعلن لا شيء.
-     * - **الجسم `application/x-www-form-urlencoded`** لا JSON: الإرسال بجسم
-     *   JSON يردّ صفراً أيضاً، والصيغة النموذجية هي التي تردّ المصادر.
-     * - **قطاعات الـHLS موسومة `image/jpeg`** والبايتات حقيقية (توقيع
-     *   MPEG-TS `0x47`)، فالفحص وحده بنوع المحتوى كان يُسقط بثاً سليماً.
+     * والمصادر تصل POST كـJSON فيه `sources[].file` رابط m3u8 حيّ. وقد قيس
+     * الآن أن النداء يردّ `index.m3u8` على `cdn4.bitlyurl.xyz` بوسم
+     * `application/x-mpegURL` ويخدم 206.
      *
      * @param playerUrl عنوان صفحة اللاعب (أساس الروابط النسبية وحقل Referer)
      * @param html      نصّها
@@ -405,8 +477,8 @@ object Family {
      * ## لماذا المجلّد وليس النطاق
      * مقيس على Sexalarab11: الصفحة تُعرِّف `baseURL = 'https://www.player01.cfd/hdplay/'`
      * ثم `url: baseURL + 'ajax_sources.php'`. فمن ألحق الاسم بجذر النطاق طلب
-     * `…/ajax_sources.php` — وهو مسار غير موجود — ولم يفهم لماذا لا تصل
-     * المصادر. والقاعدة نفسها في HTTP: النسبي يُحَلّ على مجلّد المستند.
+     * `…/ajax_sources.php` — وهو مسار غير موجود. والقاعدة نفسها في HTTP:
+     * النسبي يُحَلّ على مجلّد المستند.
      */
     private fun absoluteUrl(playerUrl: String, endpoint: String): String = when {
         endpoint.startsWith("http") -> endpoint

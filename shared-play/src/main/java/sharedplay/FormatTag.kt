@@ -99,6 +99,16 @@ suspend fun emitChecked(
         newExtractorLink(source = shown, name = shown, url = url, type = type) {
             this.quality = quality
             if (!referer.isNullOrBlank()) this.referer = referer
+            // نوع المحتوى إلزامي عملياً: الرابط الذي لا تصل معه هذه الترويسة
+            // يبني المشغّل له بيانات وصفية نوعها `null`، ويُقاس أن
+            // `FfmpegVideoRenderer` يرمي NPE عليها في مسار اختيار الصوت —
+            // وهو سقوطٌ يبدو عطلاً في الإضافة لا في الترويسة. فتُشتقّ من
+            // الامتداد هنا كما تفعل [Family.deliver] بالحرف.
+            this.headers = if (referer.isNullOrBlank()) {
+                mapOf("Content-Type" to Probe.rt(url))
+            } else {
+                mapOf("Referer" to referer, "Content-Type" to Probe.rt(url))
+            }
         }
     )
     return true

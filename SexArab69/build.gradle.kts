@@ -2,7 +2,7 @@ android {
     namespace = "com.sexarab69.plugin"
 }
 
-version = 3
+version = 4
 
 cloudstream {
     description = "إضافة سكس عرب 69 - أفلام إباحية عربية"
