@@ -4,11 +4,13 @@ import android.content.SharedPreferences
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Element
 import sharedplay.PluginSettings
+import sharedplay.Probe
 import sharedplay.emitChecked
 
 /**
@@ -124,8 +126,14 @@ class ArabxCamProvider(private val prefs: SharedPreferences? = null) : MainAPI()
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
+        val probeOn = prefs?.getBoolean(PluginSettings.probeKey(PREFS_NAME), true) ?: true
+        val tagOn = prefs?.getBoolean(PluginSettings.tagKey(PREFS_NAME), true) ?: true
 
-        suspend fun emit(url: String, quality: Int = Qualities.Unknown.value) {
+        suspend fun emit(
+            url: String,
+            quality: Int = Qualities.Unknown.value,
+            probe: Boolean = probeOn
+        ) {
             // فحص + وسم بخياري الإضافة: يُسقط الرابط الميت (منعاً لخطأ 2004)
             // ويُظهر الصيغة (MP4/M3U8/DASH…) في اسم السيرفر.
             if (emitChecked(
@@ -134,10 +142,32 @@ class ArabxCamProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                     referer = mainUrl,
                     quality = quality,
                     callback = callback,
-                    probe = prefs?.getBoolean(PluginSettings.probeKey(PREFS_NAME), true) ?: true,
-                    tag = prefs?.getBoolean(PluginSettings.tagKey(PREFS_NAME), true) ?: true
+                    probe = probe,
+                    tag = tagOn
                 )
             ) found = true
+        }
+
+        /**
+         * ## لماذا دفعة واحدة لا رابطاً بعد رابط
+         * كانت المرشّحات تُفحص تباعاً، وسعر الفحص الواحد على هذه العائلة
+         * **1.7–4.4 ثانية** على مضيف حيّ ومهلة كاملة (8 ثوانٍ) على المعلّق —
+         * فزمن الصفحة = **مجموع** الأزمنة لا أقصاها. وهذا بالحرف ما شكا منه
+         * المستخدم: «سرعة الاستجابة للتشغيل… سريع». فتُفحص المرشّحات كلها في
+         * دفعة واحدة بحدّ ستّ مسارات، ثم يُصدَر الحيّ وحده بترتيب الصفحة فلا
+         * يتبدّل ترتيب السيرفرات أمام المستخدم. وإصدار ما فُحص سلفاً بفحص
+         * ثانٍ هو ما يُبطئ الدفعة من جديد، فيُمرَّر `probe = false` هنا.
+         */
+        suspend fun emitBatch(urls: List<Pair<String, Int>>) {
+            if (urls.isEmpty()) return
+            if (!probeOn) {
+                for ((u, q) in urls) emit(u, q, probe = false)
+                return
+            }
+            val ordered = LinkedHashMap<String, Int>()
+            for ((u, q) in urls) if (u !in ordered) ordered[u] = q
+            val live = Probe.aliveSubset(ordered.keys.toList(), mainUrl)
+            for ((u, q) in ordered) if (u in live) emit(u, q, probe = false)
         }
 
 
@@ -158,15 +188,14 @@ class ArabxCamProvider(private val prefs: SharedPreferences? = null) : MainAPI()
                 rgx(candScript, "video_alt_url") to rgx(candScript, "video_alt_url_text"),
                 rgx(candScript, "video_alt_url2") to rgx(candScript, "video_alt_url2_text"),
                 rgx(candScript, "video_hd_url") to rgx(candScript, "video_hd_url_text")
-            ).forEach { (url, q) ->
-                if (url != null && isWorkingGetFile(url)) {
-                    android.util.Log.i(TAG, "M1 emit url=${url.take(70)} q=$q")
+            ).filter { (url, _) -> url != null && isWorkingGetFile(url) }
+                .distinctBy { cln(it.first!!) }
+                .forEach { (url, q) ->
+                    android.util.Log.i(TAG, "M1 emit url=${url!!.take(70)} q=$q")
                     emit(cln(url), qualityFromLabel(q))
                 }
-            }
             if (found) return true
         }
-
         // ═══ 2) مشغل embed (playeriz / محلي KVS) — نجرّبه محلياً فقط
         android.util.Log.i(TAG, "M2 مسح embeds / twitter:player…")
         val embeds = doc.select("iframe[src]").map { it.attr("src") }
@@ -176,56 +205,64 @@ class ArabxCamProvider(private val prefs: SharedPreferences? = null) : MainAPI()
             embeds.forEach { add(it) }
             if (!tw.isNullOrBlank()) add(tw)
         }
-        var tried = 0
-        for (embedUrl in order) {
-            if (found || tried++ >= 2) break
-            val resolved = fixUrl(embedUrl)
-            android.util.Log.i(TAG, "embed try #$tried: $resolved")
-            val html = try {
-                kotlinx.coroutines.withTimeout(10000) {
-                    app.get(resolved, headers = defaultHeaders + ("Referer" to safeReferer())).text
-                }
-            } catch (e: Exception) {
-                android.util.Log.w(TAG, "embed fetch fail (${e.javaClass.simpleName}): ${e.message}")
-                null
-            }
-            if (html != null) {
-                android.util.Log.i(TAG, "embed fetched ${html.length}B")
-                // 2a) كود مضغوط → master.m3u8
-                unpackPacked(html)?.let { unpacked ->
-                    findMasterM3U8(unpacked)?.let {
-                        android.util.Log.i(TAG, "unpacked master: $it")
-                        emit(it)
+        // ## الإطارات معاً لا واحداً بعد الآخر
+        // كانت الإطارات تُجلب في دورة واحدة تلو الأخرى، وكل جلب بمهلة عشر
+        // ثوانٍ، ثم يُفحص ما فيه على حدة. فإطاران معلّقان = 20 ثانية قبل أن
+        // يُجرَّب البديل — وهو «يدور ولا يُظهر شيئاً». تُجلب الآن معاً، ثم
+        // تُفحص المرشّحات كلها في دفعة واحدة.
+        val embedMedia = coroutineScope {
+            order.take(2).map { embedUrl ->
+                async(Dispatchers.IO) {
+                    val resolved = fixUrl(embedUrl)
+                    android.util.Log.i(TAG, "embed fetch: $resolved")
+                    val html = try {
+                        kotlinx.coroutines.withTimeout(10_000) {
+                            app.get(resolved, headers = defaultHeaders + ("Referer" to safeReferer())).text
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.w(TAG, "embed fetch fail (${e.javaClass.simpleName}): ${e.message}")
+                        null
+                    } ?: return@async emptyList<String>()
+                    android.util.Log.i(TAG, "embed fetched ${html.length}B")
+                    buildList {
+                        // 2a) كود مضغوط → master.m3u8
+                        unpackPacked(html)?.let { unpacked ->
+                            findMasterM3U8(unpacked)?.let {
+                                android.util.Log.i(TAG, "unpacked master: $it")
+                                add(it)
+                            }
+                        }
+                        // 2b) روابط free داخل صفحة الـ embed (mp4/m3u8)
+                        Regex("""https?://[^\s"'<>]+\.(?:m3u8|mp4)[^\s"'<>]*""", RegexOption.IGNORE_CASE)
+                            .findAll(html).map { it.value }
+                            .filterNot { it.endsWith(".jpg") || it.endsWith(".png") || it.endsWith(".webp") }
+                            .forEach { add(it) }
                     }
                 }
-                // 2b) روابط free داخل صفحة الـ embed (mp4/m3u8)
-                if (!found) {
-                    Regex("""https?://[^\s"'<>]+\.(?:m3u8|mp4)[^\s"'<>]*""", RegexOption.IGNORE_CASE)
-                        .findAll(html).map { it.value }.distinct()
-                        .filterNot { it.endsWith(".jpg") || it.endsWith(".png") || it.endsWith(".webp") }
-                        .forEach { emit(it) }
+            }.awaitAll().flatten()
+        }
+        emitBatch(embedMedia.distinct().map { it to Qualities.Unknown.value })
+        if (found) return true
+
+        // ═══ 3+4) وسوم الوسائط وروابط السكربتات — دفعة فحص واحدة
+        //        (كانت مرحلتين كلٌّ منهما تفحص تباعاً؛ وهما مسحتان محليتان
+        //        لنفس الصفحة، فدمجهما يوفّر دورة فحص كاملة بلا فقد رابط.)
+        android.util.Log.i(TAG, "M3+M4 video tags & script urls…")
+        val pageMedia = buildList {
+            for (el in doc.select("video source[src], video[src], source[src]")) {
+                val src = el.attr("src").ifBlank { el.attr("data-src") }
+                if (src.isNotBlank() && (src.contains(".mp4") || src.contains(".m3u8"))) {
+                    add(fixUrl(src))
                 }
             }
-            if (found) break
+            val scriptTexts = doc.select("script").joinToString("\n") { it.data() }
+            Regex("""https?://[^\s"'<>]+\.(?:mp4|m3u8)[^\s"'<>]*""", RegexOption.IGNORE_CASE)
+                .findAll(scriptTexts).map { it.value }
+                .filter { !it.contains("get_file") }
+                .filterNot { it.endsWith(".jpg") || it.endsWith(".png") || it.endsWith(".webp") }
+                .forEach { add(it) }
         }
-        if (found) return true
-
-        // ═══ 3) HTML5 <video>/<source> في التفاصيل
-        android.util.Log.i(TAG, "M3 video tags…")
-        for (el in doc.select("video source[src], video[src], source[src]")) {
-            val src = el.attr("src").ifBlank { el.attr("data-src") }
-            if (src.isNotBlank() && (src.contains(".mp4") || src.contains(".m3u8"))) emit(fixUrl(src))
-        }
-        if (found) return true
-
-        // ═══ 4) روابط mp4/m3u8 مباشرة في نصوص السكربتات (استبعاد get_file — يُعالج أعلاه أو 403)
-        android.util.Log.i(TAG, "M4 direct urls في scripts…")
-        val scriptTexts = doc.select("script").joinToString("\n") { it.data() }
-        Regex("""https?://[^\s"'<>]+\.(?:mp4|m3u8)[^\s"'<>]*""", RegexOption.IGNORE_CASE)
-            .findAll(scriptTexts).map { it.value }.distinct()
-            .filter { !it.contains("get_file") }
-            .filterNot { it.endsWith(".jpg") || it.endsWith(".png") || it.endsWith(".webp") }
-            .forEach { emit(it) }
+        emitBatch(pageMedia.distinct().map { it to Qualities.Unknown.value })
 
         android.util.Log.i(TAG, "loadLinks done found=$found")
         return found

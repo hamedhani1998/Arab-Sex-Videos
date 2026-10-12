@@ -50,6 +50,23 @@ object Probe {
         verdict(url, referer) == Verdict.ALIVE
 
     /**
+     * ## لماذا إعادة واحدة عند «غير معروف» فقط
+     * قياس على `api.sexalarab.net/hls/…/master.m3u8` (2026-10-12، 40 محاولة
+     * متتالية بنفس شكل طلب المشغّل): 38 نجحت من أول محاولة، ومحاولتان
+     * انتهت مهلتهما، **وكلتاهما نجحت في إعادة فورية** — فمعدّل الفشل
+     * المتقطّع نحو 5%، والإعادة تُنقذ 100% منه.
+     *
+     * والأثر أكبر من 5%: `SexAlarabNet` يجد على صفحة الفيديو **مرشّحاً
+     * واحداً**، فسقوطه مرّة يعني «لا روابط» في تلك الفتحة بلا سبب حقيقي.
+     * وفي [aliveSubset] يسقط المرشّح من الدفعة فيضيع سيرفر كامل.
+     *
+     * والإعادة **لا** تُطبَّق على DEAD: 404/403 حكم صادر عن الخادم، وإعادته
+     * تُضاعف زمن رابط ميت مؤكّد بلا أن تُغيّر الحكم — وهي التي رفعنا المهلة
+     * لأجلها. الشرط `== UNKNOWN` هو الفرق بين إصلاحٍ وتكرار نفس العطل.
+     */
+    private const val RETRIES_ON_UNKNOWN = 1
+
+    /**
      * الحكم مع سببه — يُستعمل في السجل حين نحتاج معرفة **لماذا** رُفض رابط.
      * الفصل مهم: «404» خبر عن الموقع، و«timeout» خبر عن الشبكة.
      *
@@ -63,6 +80,17 @@ object Probe {
      * الذي يُظهر للمستخدم خطأ 2002 (انتهت مهلة الاتصال).
      */
     suspend fun verdict(url: String, referer: String? = null): Verdict {
+        var v = attempt(url, referer)
+        // إعادة عند «لم أستطع الحكم» وحدها — لا عند الموت المؤكّد ولا عند الحياة.
+        var tries = 0
+        while (v == Verdict.UNKNOWN && tries++ < RETRIES_ON_UNKNOWN) {
+            v = attempt(url, referer)
+        }
+        return v
+    }
+
+    /** محاولة واحدة — الفصل عن [verdict] ليمكن إعادتها بلا تكرار الشروط. */
+    private suspend fun attempt(url: String, referer: String? = null): Verdict {
         if (!url.startsWith("http")) return Verdict.DEAD
         val headers = HashMap<String, String>()
         headers["User-Agent"] = UA

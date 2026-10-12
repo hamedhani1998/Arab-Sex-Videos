@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 import sharedplay.PluginSettings
+import sharedplay.Probe
 import sharedplay.emitChecked
 
 /**
@@ -113,8 +114,14 @@ class SexAlArabNetProvider(private val prefs: SharedPreferences? = null) : MainA
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
+        val probeOn = prefs?.getBoolean(PluginSettings.probeKey(PREFS_NAME), true) ?: true
+        val tagOn = prefs?.getBoolean(PluginSettings.tagKey(PREFS_NAME), true) ?: true
 
-        suspend fun emit(url: String, quality: Int = Qualities.Unknown.value) {
+        suspend fun emit(
+            url: String,
+            quality: Int = Qualities.Unknown.value,
+            probe: Boolean = probeOn
+        ) {
             // فحص + وسم بخياري الإضافة: يُسقط الرابط الميت (منعاً لخطأ 2004)
             // ويُظهر الصيغة (MP4/M3U8/DASH…) في اسم السيرفر.
             if (emitChecked(
@@ -123,8 +130,8 @@ class SexAlArabNetProvider(private val prefs: SharedPreferences? = null) : MainA
                     referer = mainUrl,
                     quality = quality,
                     callback = callback,
-                    probe = prefs?.getBoolean(PluginSettings.probeKey(PREFS_NAME), true) ?: true,
-                    tag = prefs?.getBoolean(PluginSettings.tagKey(PREFS_NAME), true) ?: true
+                    probe = probe,
+                    tag = tagOn
                 )
             ) found = true
         }
@@ -132,30 +139,46 @@ class SexAlArabNetProvider(private val prefs: SharedPreferences? = null) : MainA
 
         val document = app.get(data, headers = defaultHeaders).document
 
-        // 1) HLS مثل <meta property="og:video" content=".../hls/<id>/master.m3u8">
-        val og = document.selectFirst("meta[property=og:video]")?.attr("content")
-        if (og != null && og.contains(".m3u8")) {
-            emit(fixUrl(og))
+        // ═══ المرشّحات كلها أولاً، ثم فحص واحد
+        //
+        // ## لماذا لا `emit` ثم `return` عند كل مرحلة
+        // كان كل مسح (og:video، ثم m3u8 في النص، ثم الوسوم، ثم الروابط) يُصدِر
+        // **ويفحص** على الفور، وكل فحص يكلّف 1.7–4.4 ثانية على مضيف حيّ ومهلة
+        // كاملة على المعلّق. فلا يبدأ المسح التالي إلا بعد نفاد انتظار السابق،
+        // والزمن **مجموع** لا أقصى — وهي بالحرف شكوى «سرعة الاستجابة».
+        // فتُجمَع المرشّحات من المسوحات كلها بلا تكرار، ثم تُفحص في دفعة واحدة
+        // بحدّ ستّ مسارات، ثم يُصدَر الحيّ وحده بترتيب الظهور.
+        val candidates = LinkedHashMap<String, Int>()
+        fun note(url: String?) {
+            val u = url?.takeIf { it.startsWith("http") } ?: return
+            if (u.endsWith(".jpg") || u.endsWith(".png") || u.endsWith(".webp")) return
+            if (!u.contains(".mp4") && !u.contains(".m3u8")) return
+            if (u !in candidates) candidates[u] = Qualities.Unknown.value
         }
-        if (found) return true
+
+        // 1) HLS مثل <meta property="og:video" content=".../hls/<id>/master.m3u8">
+        document.selectFirst("meta[property=og:video]")?.attr("content")?.let { note(fixUrl(it)) }
 
         // 2) HLS في JSON-LD / next data
         val raw = document.text()
-        val m3u8s = Regex("""https?://[^\s"']+\.m3u8[^\s"']*""", RegexOption.IGNORE_CASE)
+        Regex("""https?://[^\s"']+\.m3u8[^\s"']*""", RegexOption.IGNORE_CASE)
             .findAll(raw).map { it.value.trimEnd('\\', '"', '\'') }.distinct()
-        for (m3u8 in m3u8s) emit(m3u8)
+            .forEach { note(it) }
 
         // 3) mp4/m3u8 مباشرة في التفاصيل إن وجدت
         for (el in document.select("video source, video[src], source[src]")) {
             val src = el.attr("src").ifBlank { el.attr("data-src") }
-            if (src.isNotBlank() && (src.contains(".mp4") || src.contains(".m3u8"))) {
-                emit(fixUrl(src))
-            }
+            if (src.isNotBlank()) note(fixUrl(src))
         }
         for (a in document.select("a[href]")) {
             val href = a.attr("href")
-            if ((href.contains(".mp4") || href.contains(".m3u8")) && !href.endsWith(".jpg") && !href.endsWith(".png")) {
-                emit(fixUrl(href))
+            if (href.contains(".mp4") || href.contains(".m3u8")) note(fixUrl(href))
+        }
+
+        if (candidates.isNotEmpty()) {
+            val live = if (probeOn) Probe.aliveSubset(candidates.keys.toList(), mainUrl) else null
+            for ((u, q) in candidates) {
+                if (live == null || u in live) emit(u, q, probe = false)
             }
         }
 
