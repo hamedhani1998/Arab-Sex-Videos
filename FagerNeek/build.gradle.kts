@@ -2,7 +2,7 @@ android {
     namespace = "com.fagerneek.plugin"
 }
 
-version = 2
+version = 3
 
 cloudstream {
     description = "إضافة فاجر نيك - أفلام إباحية عربية مترجمة"

@@ -2,7 +2,7 @@ android {
     namespace = "com.arbnaar.plugin"
 }
 
-version = 2
+version = 3
 
 cloudstream {
     description = "إضافة عرب نار - أفلام إباحية عربية"

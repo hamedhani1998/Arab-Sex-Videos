@@ -2,7 +2,7 @@ android {
     namespace = "com.sexalarab11.plugin"
 }
 
-version = 2
+version = 3
 
 cloudstream {
     description = "سكس العرب11 - أفلام إباحية عربية"

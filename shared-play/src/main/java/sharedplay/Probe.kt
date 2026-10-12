@@ -61,12 +61,28 @@ object Probe {
             val code = resp.code
             when {
                 code in 200..299 -> {
-                    // رمز 200 لا يكفي: الموقع يحقن بكسل تتبّع على نفس نمط الرابط
-                    // (`/get_file/…/3329.mp4/`) فيردّ 200 بمحتوى `image/gif` من
-                    // 43 بايت. لو قُبل، ظهر سيرفر «شغّال» لا يبثّ شيئاً.
+                    // رمز 200 لا يكفي — ولا نوع المحتوى وحده. قياسان:
+                    // 1) الموقع يحقن بكسل تتبّع على نمط الرابط نفسه، فيردّ 200
+                    //    بمحتوى `image/gif` من 43 بايت.
+                    // 2) رابط `get_file` بلا توكن لا يردّ 404 بل **يعيد صفحة
+                    //    الموقع الرئيسية** بمحتوى `text/html` ورمز 200. لو
+                    //    قُبل لَما ظهر «لا روابط» بل ظهر خطأ 3003 في المشغّل
+                    //    (بايتات ليست وسائط) — وهو أسوأ لأنه يبدو عطلاً في
+                    //    التطبيق لا في الرابط.
                     val ct = (resp.headers["Content-Type"]
                         ?: resp.headers["content-type"] ?: "").lowercase()
-                    if (ct.startsWith("image/")) Verdict.DEAD else Verdict.ALIVE
+                    when {
+                        ct.startsWith("image/") ||
+                            ct.startsWith("text/html") ||
+                            ct.startsWith("text/plain") ||
+                            ct.startsWith("application/json") -> Verdict.DEAD
+                        else -> Verdict.ALIVE
+                    }
+                    // ملاحظة مقيسة: موقع Sexalarab11 يسم `index.m3u8` بـ
+                    // `application/vnd.apple.mpegurl` (صحيح) لكن قطاعات البث
+                    // نفسها يسمّيها `image/jpeg` وبايتاتها MPEG-TS حقيقية.
+                    // وهذا لا يضرّ هنا لأن الفحص يقع على `index.m3u8` لا على
+                    // القطاعات، والمشغّل وحده هو من يقرأ القطاعات لاحقاً.
                 }
                 // رموز الحكم بالموت: مورد غير موجود أو ممنوع أو منتهي.
                 code == 401 || code == 403 || code == 404 || code == 410 ||
@@ -84,12 +100,72 @@ object Probe {
     }
 
     /**
+     * نوع محتوى الرابط مشتقّاً من امتداده.
+     *
+     * لهذا غرضٌ عمليّ لا تجميليّ: بناء بيانات وصفية بلا نوع محتوى يجعل
+     * المشغّل يعمل على `null` في مسار اختيار الصوت (`FfmpegVideoRenderer`)
+     * ويرمي NPE — وهو سقوطٌ يبدو للمستخدم كعطل في الإضافة لا في الترويسة.
+     */
+    fun rt(url: String): String {
+        val path = url.substringBefore('?').substringBefore('#').lowercase()
+        return when {
+            path.endsWith(".mp4") || path.endsWith(".m4v") -> "video/mp4"
+            path.endsWith(".m3u8") -> "application/vnd.apple.mpegurl"
+            path.endsWith(".mpd") -> "application/dash+xml"
+            path.endsWith(".webm") -> "video/webm"
+            path.endsWith(".mkv") -> "video/x-matroska"
+            path.endsWith(".ts") -> "video/mp2t"
+            else -> "video/mp4"
+        }
+    }
+
+    /**
      * يقبل أول رابط حيّ من قائمة مرشّحين — يوفّر طلبات حين يكون الأول سليماً.
      * يُعيد null إن مات الجميع.
      */
     suspend fun firstAlive(candidates: List<String>, referer: String? = null): String? {
         for (c in candidates) if (alive(c, referer)) return c
         return null
+    }
+
+    /**
+     * تنظيف رابط `get_file` قبل الفحص والإصدار.
+     *
+     * ## القاعدة التي كانت تقتل كل الأفلام
+     * القياس على أفلامك1 قاطع: **الرابط نفسه بلا استعلام يعيد الصفحة الرئيسية
+     * HTML، ومع `?v-acctoken=…` يعيد 206 video/mp4**. فقصُّ الاستعلام كاملاً —
+     * كما كان الحلّال يفعل — هو الذي جعل كل إضافة من هذه العائلة تعلن «لا
+     * روابط». دروسٌ سابقة كانت على مواقع يردّ فيها الاستعلام 404، والصواب
+     * ليس «قصّ الكل» ولا «إبقاء الكل» بل **إسقاط الحشو وحده**.
+     *
+     * ## ما يُسقَط وما يبقى
+     * يُسقَط ما يغيّر المعنى إلى «طلب تحميل» أو «مقاس معيّن» فيردّ الخادم
+     * 404: `br`, `embed`, `download`, `download_filename`, `download_orig`,
+     * `orig`, `token` (وقع مرتين بهذا الاسم في نفس النطاق بردّ 410).
+     * ويبقى كل ما يشبه توكن منع السرقة (`v-acctoken`, `acctoken`, `hash`,
+     * `st`, `sig`, `expire`) — وبقاؤه شرط العمل لا تحسين.
+     *
+     * @return الرابط منظّفاً، أو `null` إن لم يبقَ ما يصلح
+     */
+    fun sanitize(raw: String): String? {
+        var url = unwrapFunction(raw.trim())
+        if (url.isBlank()) return null
+        if (url.startsWith("//")) url = "https:$url"
+        if (!url.startsWith("http")) return null
+
+        val drop = setOf(
+            "br", "embed", "download", "download_filename", "download_orig",
+            "orig", "token", "preview"
+        )
+        val q = url.substringAfter('?', "")
+        if (q.isEmpty()) return url
+
+        val kept = q.split('&').filter { part ->
+            val key = part.substringBefore('=').lowercase()
+            key.isNotBlank() && key !in drop
+        }
+        return if (kept.isEmpty()) url.substringBefore('?')
+        else url.substringBefore('?') + "?" + kept.joinToString("&")
     }
 
     /** قائمة جودات KVS بصيغة «القيمة = اسم الجودة». */
@@ -102,8 +178,14 @@ object Probe {
 
     /**
      * رابط القرص المباشر على نمط KVS: `/contents/videos/<bucket>/<id>/<id>.mp4`
-     * حيث `bucket = floor(id/1000)*1000`. هذا المسار يخدم الملف الخام بلا
-     * توكن ولا وسيط، وهو الذي نجح على المواقع التي يردّ فيها `get_file` 404.
+     * حيث `bucket = floor(id/1000)*1000`.
+     *
+     * ## تنبيه: هذا المسار لا يعمل على هذه العائلة
+     * قياس 2026-10-12 على كل موقع من العائلة: المسار يردّ **404** دائماً،
+     * بجودة وبلا جودة، على الأصل وعلى CDN. وقد ذُكر سابقاً أنه الرابط الحيّ
+     * على SexArabFun وFreeSexArab — وذلك خطأ فُحص وأُبطل. فالحيّ هو روابط
+     * `get_file` المحصودة بتوكنها. تبقى الدالة موجودة كملاذ أخير فقط
+     * ([resolveKvsDirect]) لأنه لا ضرر من تجربتها بعد فشل كل شيء.
      */
     fun directKvsPaths(origin: String, videoId: String, withQualities: Boolean = true): List<String> {
         val id = videoId.toIntOrNull() ?: return emptyList()

@@ -25,6 +25,39 @@ class SexArab69Provider(private val prefs: SharedPreferences? = null) : MainAPI(
         "category/سكس-امهات/" to "سكس امهات",
     )
 
+    /**
+     * بطاقة الفيلم في هذا الموقع.
+     *
+     * ## المحدّد السابق كان يعيد صفراً
+     * كان `div.video-block`، ولا وجود لعنصر بهذا الاسم في الصفحة الحيّة:
+     * البطاقات `article.loop-video` (28 بطاقة في الرئيسية بالعدد) وما عداه
+     * أثر قالب قديم. فالمحدّد الخاطئ لا يرمي استثناء ولا يكتب سطراً في
+     * السجل — يعيد قائمة فارغة فحسب، فتبدو الإضافة فارغة في الرئيسية
+     * والبحث معاً بلا أي سبب ظاهر.
+     */
+    private val cardSelector = "article.loop-video"
+
+    /**
+     * يبني بطاقة من عنصر البطاقة الحيّ.
+     *
+     * الصورة في `data-src` لا `src` (تحويل متأخر)، والعنوان في `a[title]`
+     * ثم في `header.entry-header > span`. والأخذ من `a[title]` أولاً مقصود:
+     * الوسم `span` يقتطع العنوان الطويل في بعض القوالب.
+     */
+    private fun org.jsoup.nodes.Element.toCard(): SearchResponse? {
+        val a = this.selectFirst("a[href]") ?: return null
+        val href = a.attr("href").trim()
+        if (href.isBlank()) return null
+        val title = a.attr("title").trim()
+            .ifBlank { this.selectFirst("header.entry-header span")?.text()?.trim().orEmpty() }
+            .ifBlank { this.selectFirst("span.title, h2, h3")?.text()?.trim().orEmpty() }
+        if (title.isBlank()) return null
+        val poster = this.selectFirst("img.video-main-thumb, img")?.let {
+            it.attr("data-src").ifBlank { it.attr("data-lazy-src").ifBlank { it.attr("src") } }
+        }
+        return newMovieSearchResponse(title, href, TvType.NSFW) { this.posterUrl = poster }
+    }
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return try {
             val url = if (request.data.isEmpty()) {
@@ -33,21 +66,7 @@ class SexArab69Provider(private val prefs: SharedPreferences? = null) : MainAPI(
                 "$mainUrl/${request.data.trimEnd('/')}/${if (page > 1) "page/$page/" else ""}"
             }
             val doc = app.get(url, referer = mainUrl).document
-            val items = doc.select("div.video-block").mapNotNull { item ->
-                try {
-                    val a = item.selectFirst("a.thumb") ?: item.selectFirst("a") ?: return@mapNotNull null
-                    val href = a.attr("href")?.toString() ?: return@mapNotNull null
-                    val title = item.selectFirst("a.infos span.title")?.text()?.trim()
-                        ?: item.selectFirst("span.title")?.text()?.trim()
-                        ?: a.attr("title") ?: ""
-                    val poster = item.selectFirst("img.video-img")?.let {
-                        it.attr("data-src").ifBlank { it.attr("data-lazy-src").ifBlank { it.attr("src") } }
-                    }
-                    newMovieSearchResponse(title, href, TvType.NSFW) {
-                        this.posterUrl = poster
-                    }
-                } catch (e: Exception) { null }
-            }
+            val items = doc.select(cardSelector).mapNotNull { it.toCard() }
             newHomePageResponse(request.name, items)
         } catch (e: Exception) { null }
     }
@@ -55,19 +74,7 @@ class SexArab69Provider(private val prefs: SharedPreferences? = null) : MainAPI(
     override suspend fun search(query: String): List<SearchResponse>? {
         return try {
             val doc = app.get("$mainUrl/?s=$query", referer = mainUrl).document
-            doc.select("div.video-block").mapNotNull { item ->
-                try {
-                    val a = item.selectFirst("a.thumb") ?: item.selectFirst("a") ?: return@mapNotNull null
-                    val href = a.attr("href")?.toString() ?: return@mapNotNull null
-                    val title = item.selectFirst("a.infos span.title")?.text()?.trim()
-                        ?: item.selectFirst("span.title")?.text()?.trim()
-                        ?: a.attr("title") ?: ""
-                    val poster = item.selectFirst("img.video-img")?.let {
-                        it.attr("data-src").ifBlank { it.attr("data-lazy-src").ifBlank { it.attr("src") } }
-                    }
-                    newMovieSearchResponse(title, href, TvType.NSFW) { this.posterUrl = poster }
-                } catch (e: Exception) { null }
-            }
+            doc.select(cardSelector).mapNotNull { it.toCard() }
         } catch (e: Exception) { null }
     }
 

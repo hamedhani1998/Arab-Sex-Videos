@@ -57,7 +57,6 @@ jobs:
           python3 - <<'EOF'
           import json, os
           label_map = {
-            "SexAlarab": "سكس العرب",
             "SexAlarabNet": "سكس العرب نت",
             "ArabXCam": "عرب اكس",
             "XHorno": "xhorno",
@@ -66,7 +65,6 @@ jobs:
             # الإضافات المنقولة من مستودع sources-arab
             "Aflamk1": "أفلامك1",
             "ArabNok": "عرب نوك",
-            "ArabSex1": "سكس عربي 1",
             "ArabSexXxx": "سكس عربي xxx",
             "ArbNaar": "عرب نار",
             "Arbada": "العربدة",

@@ -2,7 +2,7 @@ android {
     namespace = "com.freesexarab.plugin"
 }
 
-version = 2
+version = 3
 
 cloudstream {
     description = "إضافة سكس عربي مجاني - أفلام إباحية عربية"
