@@ -2,7 +2,7 @@ android {
     namespace = "com.aflamk1.plugin"
 }
 
-version = 4
+version = 5
 
 cloudstream {
     description = "إضافة أفلامك1 - أفلام إباحية عربية"
